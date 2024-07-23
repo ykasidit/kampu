@@ -19,14 +19,13 @@ struct Schema {
 }
 
 fn parse_bits(data: &[u8], bit_offset:usize, num_bits: u32) -> (u64, usize) {
-    let mut reader = LittleEndianReader::new(data);
     let n_bytes_to_skip = bit_offset / 8;
     let n_bits_to_skip = (bit_offset % 8) as u32;
-    if n_bytes_to_skip > 0 {
-        for _ in 0..n_bytes_to_skip {
-            reader.read_u8();
-        }
-    }
+    let mut reader = if n_bytes_to_skip > 0 {
+        LittleEndianReader::new(&data[n_bytes_to_skip..])
+    } else {
+        LittleEndianReader::new(data)
+    };
     if n_bits_to_skip > 0 {
         _ = reader.read_bits(n_bits_to_skip);
     }
@@ -420,5 +419,56 @@ mod tests {
         let (parsed_json, _) = parse_binary(&[], &schema.fields, true, &mut previous_values);
 
         assert_eq!(parsed_json, Value::Null);
+    }
+
+    #[test]
+    fn test_coral_reef() {
+        let coral_reef_structure_json = json!({
+            "fields": [
+                { "name": "nature_reserve_id", "type": "u16" },
+                { "name": "n_colonies", "type": "u32" },
+                { "name": "region_id", "type": "u16" },
+                {
+                "name": "colonies", "type": "fields__loop__n_colonies", "fields": [
+                    { "name": "n_polyps", "type": "u32" },
+                    { "name": "polyps", "type": "fields__loop__n_polyps", "fields": [
+                        { "name": "polyp_id", "type": "u32" },
+                        { "name": "polyp_type", "type": "u8" }
+                    ]
+                    }
+                ]
+                }
+            ]
+        });
+
+        let data = parse_hex_string(r#"
+        fe ff
+        01 00 00 00
+        04 00
+        02 00 00 00
+        00 00 00 00
+        01
+        01 00 00 00
+        01
+        "#);
+
+        let schema = load_schema(coral_reef_structure_json);
+        let mut previous_values = HashMap::new();
+        let (parsed_json, _) = parse_binary(&data, &schema.fields, false, &mut previous_values);
+
+        assert_eq!(parsed_json, json!({
+            "n_colonies": 1,
+            "nature_reserve_id": 65534,
+            "region_id": 4,
+            "colonies": [
+                {
+                    "n_polyps": 2,
+                    "polyps": [
+                    { "polyp_id": 0, "polyp_type": 1},
+                    { "polyp_id": 1, "polyp_type": 1}
+                ]
+                }
+            ]
+        }));
     }
 }

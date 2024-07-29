@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use serde_json::{Map, Value, Number, json};
+use serde_json::{Map, Value, Number};
 use std::collections::{HashMap, HashSet};
 use bitter::{BitReader, LittleEndianReader};
 
@@ -10,7 +10,9 @@ struct Field {
     field_type: Option<String>,
     #[serde(rename = "match")]
     match_cases: Option<Map<String, Value>>,
+    loop_count: Option<Value>,
     fields: Option<Vec<Field>>,
+    optional: Option<bool>
 }
 
 #[derive(Deserialize, Debug)]
@@ -67,27 +69,37 @@ fn verify_schema(schema: &[Field], known_fields: &mut HashSet<String>) -> bool {
         known_fields.insert(field.name.clone());
 
         // Check for valid entries
-        let mut valid_keys = vec!["name", "type", "fields", "match"];
         if let Some(field_type) = &field.field_type {
-            if field_type.starts_with("fields__loop__") {
-                let loop_field_name = &field_type[13..];
-                if !known_fields.contains(loop_field_name) {
-                    println!("Error: Unknown field '{}' referenced in '{}'.", loop_field_name, field.name);
-                    return false;
+            match field.loop_count.clone() {
+                Some(loop_count) => {
+                    match loop_count {
+                        Value::Number(_) => {
+
+                        }
+                        Value::String(_) => {
+                            let loop_field_name = &field_type[13..];
+                            if !known_fields.contains(loop_field_name) {
+                                println!("Error: Unknown field '{}' referenced in '{}'.", loop_field_name, field.name);
+                                return false;
+                            }
+                        }
+                        _ => {
+                            panic!("unsupported loop_count value: {loop_count} - it must either be a number or a string name of a previous field");
+                        }
+                    }
                 }
-            } else {
-                let valid_types = vec![
-                    "u8", "u8_le", "u8_be", "u16", "u16_le", "u16_be", "u32", "u32_le", "u32_be",
-                    "u64", "u64_le", "u64_be", "f32", "f32_le", "f32_be", "f64", "f64_le", "f64_be",
-                    "i16", "i16_le", "i16_be",
+                None => {
+                let valid_types = vec ! [
+                "u8", "u8_le", "u8_be", "u16", "u16_le", "u16_be", "u32", "u32_le", "u32_be",
+                "u64", "u64_le", "u64_be", "f32", "f32_le", "f32_be", "f64", "f64_le", "f64_be",
+                "i16", "i16_le", "i16_be",
                 ];
-                if !valid_types.contains(&field_type.as_str()) {
-                    println!("Error: Invalid type '{}' in field '{}'.", field_type, field.name);
-                    return false;
+                if ! valid_types.contains( & field_type.as_str()) {
+                println ! ("Error: Invalid type '{}' in field '{}'.", field_type, field.name);
+                return false;
+                }
                 }
             }
-        } else {
-            valid_keys.retain(|&k| k != "type");
         }
 
         let field_keys: Vec<String> = field
@@ -95,6 +107,7 @@ fn verify_schema(schema: &[Field], known_fields: &mut HashSet<String>) -> bool {
             .as_ref()
             .map(|mc| mc.keys().cloned().collect())
             .unwrap_or_else(Vec::new);
+
         let all_keys = vec!["type", "fields"];
 
         for key in field_keys {
@@ -114,7 +127,42 @@ fn verify_schema(schema: &[Field], known_fields: &mut HashSet<String>) -> bool {
     true
 }
 
-fn parse_binary(
+pub fn get_field_size(field: &Field, previous_values: &mut HashMap<String, u64>) -> (u32, Option<u64>)
+{
+     if field.loop_count.is_some() {
+        match field.loop_count.clone().unwrap() {
+            Value::String(loop_field_name) => {
+                if let Some(&loop_count) = previous_values.get(&loop_field_name) {
+                    println!("loop_count from previous_values {}", loop_count);
+                    (0, Some(loop_count))
+                } else {
+                    panic!("Previous field {} not found for loop_count matching", loop_field_name);
+                }
+            }
+            Value::Number(loop_count_static) => {
+                (0, Some(loop_count_static.as_u64().unwrap()))
+            }
+            _ => {
+                panic!("loop_count must be either a previous field name or a number");
+            }
+        }
+    } else {
+        let bits = match field.field_type.clone().unwrap().as_str() {
+            "u8" | "u8_le" | "u8_be" => 8,
+            "u16" | "u16_le" | "u16_be" => 16,
+            "u32" | "u32_le" | "u32_be" => 32,
+            "u64" | "u64_le" | "u64_be" => 64,
+            "f32" | "f32_le" | "f32_be" => 32,
+            "f64" | "f64_le" | "f64_be" => 64,
+            "i16" | "i16_le" | "i16_be" => 16,
+            t if t.starts_with('u') && t.len() > 1 => t[1..].parse().unwrap_or(0),
+            _ => 0,
+        };
+        (bits, None)
+    }
+}
+
+pub fn parse_binary(
     data: &[u8],
     schema: &[Field],
     dry_run: bool,
@@ -133,35 +181,11 @@ fn parse_binary(
     let mut parsed_data = Map::new();
 
     for field in schema {
-        println!("proc field {:?} 0", field);
-        if let Some(field_type) = &field.field_type {
-            let (field_bits, is_loop) = if field_type.starts_with("fields__loop__") {
-                let loop_field_name = &field_type[14..];
-                println!("loop_field_name: {} prev vals {:?}", loop_field_name, previous_values);
-                if let Some(&loop_count) = previous_values.get(loop_field_name) {
-                    println!("loop_count {}", loop_count);
-                    (0, Some(loop_count))
-                } else {
-                    panic!("Previous field {} not found for looping: {}", loop_field_name, field_type);
-                }
-            } else {
-                let bits = match field_type.as_str() {
-                    "u8" | "u8_le" | "u8_be" => 8,
-                    "u16" | "u16_le" | "u16_be" => 16,
-                    "u32" | "u32_le" | "u32_be" => 32,
-                    "u64" | "u64_le" | "u64_be" => 64,
-                    "f32" | "f32_le" | "f32_be" => 32,
-                    "f64" | "f64_le" | "f64_be" => 64,
-                    "i16" | "i16_le" | "i16_be" => 16,
-                    t if t.starts_with('u') && t.len() > 1 => t[1..].parse().unwrap_or(0),
-                    _ => 0,
-                };
-                (bits, None)
-            };
-            //println!("proc field1 {:?} 0 is_loop {:?}", field, is_loop);
-
-            if is_loop.is_none() && field_bits == 0 {
-                println!("Unsupported type: {}", field_type);
+        println!("proc field {:?}", field);
+        if field.field_type.is_some() || field.loop_count.is_some() {
+            let (field_bits, loop_count_option) = get_field_size(&field, previous_values);
+            if loop_count_option.is_none() && field_bits == 0 {
+                println!("Invalid field - not a loop and no bits to parse: {:?}", field);
                 continue;
             }
 
@@ -212,7 +236,8 @@ fn parse_binary(
                 new_bit_offset
             };
 
-            if let Some(loop_count) = is_loop {
+            if let Some(loop_count) = loop_count_option {
+                println!("loop_count: {}", loop_count);
                 let mut output_array:Vec<Value> = vec![];
                 for _ in 0..loop_count {
                     let (nested_data, nested_bits) = parse_binary(&data[(bit_offset / 8)..], field.fields.as_ref().unwrap(), dry_run, previous_values);
@@ -221,6 +246,7 @@ fn parse_binary(
                 }
                 parsed_data.insert(field.name.clone(), Value::Array(output_array));
             } else {
+                let field_type = &field.field_type.clone().unwrap();
                 if !dry_run {
                     let (value, new_bit_offset) = parse_bits(data, bit_offset, field_bits);
                     bit_offset = new_bit_offset;
@@ -239,7 +265,7 @@ fn parse_binary(
                             "f64_be" => Number::from_f64(f64::from_be_bytes((value as u64).to_be_bytes()) as f64).unwrap(),
                             "i16" | "i16_le" => Number::from(i16::from_le_bytes((value as u16).to_le_bytes())),
                             "i16_be" => Number::from(i16::from_be_bytes((value as u16).to_be_bytes())),
-                            //t if t.starts_with('u') => Number::from(value),
+                            t if t.starts_with('u') => Number::from(value),
                             _ => Number::from_f64(0.0/0.0).unwrap(),
                     };
                     bit_offset = process_field(final_value.as_u64().unwrap(), bit_offset);
@@ -350,7 +376,7 @@ mod tests {
             "fields": [
                 { "name": "count", "type": "u8" },
                 { "name": "reserved", "type": "u8" },
-                { "name": "items", "type": "fields__loop__count", "fields": [
+                { "name": "items", "loop_count":"count", "fields": [
                     { "name": "item", "type": "u8" }
                 ]}
             ]
@@ -429,9 +455,9 @@ mod tests {
                 { "name": "n_colonies", "type": "u32" },
                 { "name": "region_id", "type": "u16" },
                 {
-                "name": "colonies", "type": "fields__loop__n_colonies", "fields": [
+                "name": "colonies", "loop_count": "n_colonies", "fields": [
                     { "name": "n_polyps", "type": "u32" },
-                    { "name": "polyps", "type": "fields__loop__n_polyps", "fields": [
+                    { "name": "polyps", "loop_count": "n_polyps", "fields": [
                         { "name": "polyp_id", "type": "u32" },
                         { "name": "polyp_type", "type": "u8" }
                     ]
@@ -470,5 +496,54 @@ mod tests {
                 }
             ]
         }));
+    }
+
+      #[test]
+    fn test_qstarz_ble_packet()
+    {
+        let schema = load_schema(json!({
+            "fields": [
+            { "name": "fix_status", "type": "u8" },
+            { "name": "rcr", "type": "u8" },
+            { "name": "millisecond", "type": "u16" },
+            { "name": "latitude", "type": "f64" },
+            { "name": "longitude", "type": "f64" },
+            { "name": "timestamp", "type": "u32" },
+            { "name": "speed", "type": "f32" },
+            { "name": "height", "type": "f32" },
+            { "name": "heading", "type": "f32" },
+            { "name": "g_sensor_x", "type": "i16" },
+            { "name": "g_sensor_y", "type": "i16" },
+            { "name": "g_sensor_z", "type": "i16" },
+            { "name": "max_snr", "type": "u16" },
+            { "name": "hdop", "type": "f32" },
+            { "name": "vdop", "type": "f32" },
+            { "name": "satellite_count_view", "type": "u8" },
+            { "name": "satellite_count_used", "type": "u8" },
+            { "name": "fix_quality", "type": "u8" },
+            { "name": "battery_percent", "type": "u8" },
+            { "name": "dummy", "type": "u16" },
+            {
+                "name": "gsv_data",
+                "type": "struct",
+                "optional": true,
+                "fields": [
+                { "name": "series_number", "type": "u8" },
+                {
+                    "name": "gsv_fields",
+                    "type": "struct",
+                    "loop_count": 3,
+                    "fields": [
+                    { "name": "prn", "type": "u8" },
+                    { "name": "elevation", "type": "u16" },
+                    { "name": "azimuth", "type": "u16" },
+                    { "name": "snr", "type": "u8" }
+                    ]
+                }
+            ]
+            }
+            ]
+        }));
+
     }
 }

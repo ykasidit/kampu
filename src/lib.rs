@@ -20,7 +20,7 @@ struct Schema {
     fields: Vec<Field>,
 }
 
-fn parse_bits(data: &[u8], bit_offset:usize, num_bits: u32) -> (u64, usize) {
+fn read_bits(data: &[u8], bit_offset:usize, num_bits: u32) -> (u64, usize) {
     let n_bytes_to_skip = bit_offset / 8;
     let n_bits_to_skip = (bit_offset % 8) as u32;
     let mut reader = if n_bytes_to_skip > 0 {
@@ -162,81 +162,72 @@ pub fn get_field_size(field: &Field, previous_values: &mut HashMap<String, u64>)
     }
 }
 
+pub fn process_field(data: &[u8], field: &Field, dry_run: bool, value: u64, bit_offset:usize, previous_values: &mut HashMap<String, u64>, parsed_data: &mut Map<String, Value>) -> usize
+{
+    let mut new_bit_offset = bit_offset;
+    if let Some(match_cases) = &field.match_cases {
+        println!("match_cases: {:?}", match_cases);
+        let mut matched = false;
+        for (key, description) in match_cases {
+            if key.starts_with("gt_") || key.starts_with("ge_") || key.starts_with("lt_") || key.starts_with("le_") {
+                if evaluate_expression(value, key) {
+                    parsed_data.insert(field.name.clone(), description.clone());
+                    matched = true;
+                    break;
+                }
+            } else if key == &value.to_string() {
+                if let Some(obj) = description.as_object() {
+                    println!("key matched: {} obj0", key);
+                    if let Some(fields) = obj.get("fields").and_then(|f| f.as_array()) {
+                        let nested_fields: Vec<Field> = serde_json::from_value(Value::Array(fields.clone())).unwrap();
+                        let (mut nested_data, nested_bits) = parse_binary(&data[(bit_offset / 8)..], &nested_fields, dry_run, previous_values);
+                        new_bit_offset += nested_bits;
+                        if nested_data.is_object() && obj.contains_key("name") {
+                            let mut no = nested_data.as_object_mut().unwrap();
+                            no.insert(
+                                "name".to_string(),
+                                obj.get("name").unwrap().clone()
+                            );
+                        }
+                        parsed_data.insert(field.name.clone(), nested_data);
+                    }
+
+                } else {
+                    println!("key matched: {} not object", key);
+                    parsed_data.insert(field.name.clone(), description.clone());
+                }
+                matched = true;
+                break;
+            }
+        }
+        if !matched {
+            parsed_data.insert(field.name.clone(), Value::String("unknown".to_string()));
+        }
+    } else {
+        parsed_data.insert(field.name.clone(), Value::Number(value.into()));
+    }
+    previous_values.insert(field.name.clone(), value);
+    new_bit_offset
+}
+
 pub fn parse_binary(
     data: &[u8],
     schema: &[Field],
     dry_run: bool,
     previous_values: &mut HashMap<String, u64>,
 ) -> (Value, usize) {
-    if dry_run {
-        let mut known_fields = HashSet::new();
-        if !verify_schema(schema, &mut known_fields) {
-            panic!("Schema verification failed.");
-        }
-        println!("Schema verification succeeded.");
-        return (Value::Null, 0);
-    }
-
     let mut bit_offset = 0;
     let mut parsed_data = Map::new();
 
     for field in schema {
         println!("proc field {:?}", field);
-        if field.field_type.is_some() || field.loop_count.is_some() {
+        if field.field_type.is_some() || field.loop_count.is_some() { //normal fields or loop
             let (field_bits, loop_count_option) = get_field_size(&field, previous_values);
             if loop_count_option.is_none() && field_bits == 0 {
                 println!("Invalid field - not a loop and no bits to parse: {:?}", field);
                 continue;
             }
-
-            let mut process_field = |value: u64, bit_offset:usize| -> usize {
-                let mut new_bit_offset = bit_offset;
-                if let Some(match_cases) = &field.match_cases {
-                    println!("match_cases: {:?}", match_cases);
-                    let mut matched = false;
-                    for (key, description) in match_cases {
-                        if key.starts_with("gt_") || key.starts_with("ge_") || key.starts_with("lt_") || key.starts_with("le_") {
-                            if evaluate_expression(value, key) {
-                                parsed_data.insert(field.name.clone(), description.clone());
-                                matched = true;
-                                break;
-                            }
-                        } else if key == &value.to_string() {
-                            if let Some(obj) = description.as_object() {
-                                println!("key matched: {} obj0", key);
-                                if let Some(fields) = obj.get("fields").and_then(|f| f.as_array()) {
-                                    let nested_fields: Vec<Field> = serde_json::from_value(Value::Array(fields.clone())).unwrap();
-                                    let (mut nested_data, nested_bits) = parse_binary(&data[(bit_offset / 8)..], &nested_fields, dry_run, previous_values);
-                                    new_bit_offset += nested_bits;
-                                    if nested_data.is_object() && obj.contains_key("name") {
-                                        let mut no = nested_data.as_object_mut().unwrap();
-                                        no.insert(
-                                            "name".to_string(),
-                                            obj.get("name").unwrap().clone()
-                                        );
-                                    }
-                                    parsed_data.insert(field.name.clone(), nested_data);
-                                }
-
-                            } else {
-                                println!("key matched: {} not object", key);
-                                parsed_data.insert(field.name.clone(), description.clone());
-                            }
-                            matched = true;
-                            break;
-                        }
-                    }
-                    if !matched {
-                        parsed_data.insert(field.name.clone(), Value::String("unknown".to_string()));
-                    }
-                } else {
-                    parsed_data.insert(field.name.clone(), Value::Number(value.into()));
-                }
-                previous_values.insert(field.name.clone(), value);
-                new_bit_offset
-            };
-
-            if let Some(loop_count) = loop_count_option {
+            if let Some(loop_count) = loop_count_option {  //loop around files
                 println!("loop_count: {}", loop_count);
                 let mut output_array:Vec<Value> = vec![];
                 for _ in 0..loop_count {
@@ -247,8 +238,7 @@ pub fn parse_binary(
                 parsed_data.insert(field.name.clone(), Value::Array(output_array));
             } else {
                 let field_type = &field.field_type.clone().unwrap();
-                if !dry_run {
-                    let (value, new_bit_offset) = parse_bits(data, bit_offset, field_bits);
+                    let (value, new_bit_offset) = if !dry_run {read_bits(data, bit_offset, field_bits)} else {(0, bit_offset as usize + field_bits as usize)};
                     bit_offset = new_bit_offset;
                     let final_value:Number = match field_type.as_str() {
                             "u8" | "u8_le" => Number::from(value as u8 as u32),
@@ -266,17 +256,16 @@ pub fn parse_binary(
                             "i16" | "i16_le" => Number::from(i16::from_le_bytes((value as u16).to_le_bytes())),
                             "i16_be" => Number::from(i16::from_be_bytes((value as u16).to_be_bytes())),
                             t if t.starts_with('u') => Number::from(value),
-                            _ => Number::from_f64(0.0/0.0).unwrap(),
+                            _ => {panic!("unsupported field_type: {}", field_type)},
                     };
-                    bit_offset = process_field(final_value.as_u64().unwrap(), bit_offset);
-                } else {
-                    bit_offset = process_field(0, bit_offset); // For dry_run, just add a placeholder value
-                }
+                    bit_offset = process_field(data, field, dry_run, final_value.as_u64().unwrap(), bit_offset, previous_values, &mut parsed_data);
             }
-        } else if let Some(fields) = &field.fields {
+        } else if let Some(fields) = &field.fields { //nested fields
             let (nested_data, nested_bits) = parse_binary(&data[(bit_offset / 8)..], fields, dry_run, previous_values);
             bit_offset += nested_bits;
             parsed_data.insert(field.name.clone(), nested_data);
+        } else {
+            panic!("unsupported usage: {:?}", field);
         }
     }
     (Value::Object(parsed_data), bit_offset)
@@ -443,8 +432,11 @@ mod tests {
         let schema = load_schema(schema_json);
         let mut previous_values = HashMap::new();
         let (parsed_json, _) = parse_binary(&[], &schema.fields, true, &mut previous_values);
-
-        assert_eq!(parsed_json, Value::Null);
+        assert_eq!(parsed_json, json!({
+            "fix_status": 0,
+            "millisecond": 0,
+            "rcr": 0
+        }));
     }
 
     #[test]

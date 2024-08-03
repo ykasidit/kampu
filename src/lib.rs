@@ -2,6 +2,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, Number};
 use std::collections::{HashMap, HashSet};
 use bitter::{BitReader, LittleEndianReader};
+use evalexpr::{ContextWithMutableVariables, eval_float, eval_float_with_context, eval_float_with_context_mut, eval_int, eval_int_with_context, eval_string, eval_string_with_context, HashMapContext};
 
 #[derive(Deserialize, Debug)]
 struct Field {
@@ -12,7 +13,10 @@ struct Field {
     match_cases: Option<Map<String, Value>>,
     loop_count: Option<Value>,
     fields: Option<Vec<Field>>,
-    optional: Option<bool>
+    optional: Option<bool>,
+    eval_int: Option<String>,
+    eval_float: Option<String>,
+    eval_string: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -127,14 +131,14 @@ fn verify_schema(schema: &[Field], known_fields: &mut HashSet<String>) -> bool {
     true
 }
 
-pub fn get_field_size(field: &Field, val_cache: &mut HashMap<String, Number>) -> (u32, Option<u64>)
+pub fn get_field_size(field: &Field, val_cache: &mut HashMap<String, Value>) -> (u32, Option<u64>)
 {
      if field.loop_count.is_some() {
         match field.loop_count.clone().unwrap() {
             Value::String(loop_field_name) => {
-                if let Some(loop_count) = val_cache.get(&loop_field_name).unwrap().as_u64() {
+                if let Some(loop_count) = val_cache.get(&loop_field_name) {
                     println!("loop_count from loop_field_name {} val_cache {}", loop_field_name, loop_count);
-                    (0, Some(loop_count))
+                    (0, Some(loop_count.as_u64().unwrap()))
                 } else {
                     panic!("Previous field {} not found for loop_count matching", loop_field_name);
                 }
@@ -162,7 +166,7 @@ pub fn get_field_size(field: &Field, val_cache: &mut HashMap<String, Number>) ->
     }
 }
 
-pub fn process_field(data: &[u8], field: &Field, dry_run: bool, value: Number, bit_offset:usize, val_cache: &mut HashMap<String, Number>, parsed_data: &mut Map<String, Value>) -> Result<usize, (Value, String)>
+pub fn process_field(data: &[u8], field: &Field, dry_run: bool, value: Number, bit_offset:usize, prev_val_cache: &mut HashMap<String, Value>, parsed_data: &mut Map<String, Value>) -> Result<usize, (Value, String)>
 {
     let mut new_bit_offset = bit_offset;
     if let Some(match_cases) = &field.match_cases {
@@ -180,7 +184,7 @@ pub fn process_field(data: &[u8], field: &Field, dry_run: bool, value: Number, b
                     println!("key matched: {} obj0", key);
                     if let Some(fields) = obj.get("fields").and_then(|f| f.as_array()) {
                         let nested_fields: Vec<Field> = serde_json::from_value(Value::Array(fields.clone())).unwrap();
-                        let (mut nested_data, nested_bits) = parse_binary(&data[(bit_offset / 8)..], &nested_fields, dry_run, val_cache)?;
+                        let (mut nested_data, nested_bits) = parse_binary(&data[(bit_offset / 8)..], &nested_fields, dry_run, prev_val_cache)?;
                         new_bit_offset += nested_bits;
                         if nested_data.is_object() && obj.contains_key("name") {
                             let mut no = nested_data.as_object_mut().unwrap();
@@ -204,9 +208,53 @@ pub fn process_field(data: &[u8], field: &Field, dry_run: bool, value: Number, b
             parsed_data.insert(field.name.clone(), Value::String("unknown".to_string()));
         }
     } else {
-        parsed_data.insert(field.name.clone(), Value::from(value.clone()));
+        //check eval expression
+        let mut eval_context = HashMapContext::new();
+        if value.is_f64() {
+            eval_context.set_value("value_float".to_string(), value.as_f64().unwrap().into());
+        } else if value.is_i64() {
+            eval_context.set_value("value_int".to_string(), value.as_i64().unwrap().into());
+        }
+        eval_context.set_value("value_string".to_string(), value.to_string().into());
+
+        if let Some(evals) = &field.eval_int {
+            let eval_ret = eval_float_with_context_mut(evals, &mut eval_context);
+            match eval_ret {
+                Ok(ret) => {
+                    parsed_data.insert(field.name.clone(), Value::from(ret));
+                    prev_val_cache.insert(field.name.clone(), Value::from(ret));
+                }
+                Err(emsg) => {
+                    parsed_data.insert(field.name.clone(), Value::from(format!("eval_int error: {}", emsg)));
+                }
+            }
+        } else if let Some(evas) = &field.eval_float {
+            let eval_ret = eval_float_with_context_mut(evas, &mut eval_context);
+            match eval_ret {
+                Ok(ret) => {
+                    parsed_data.insert(field.name.clone(), Value::from(ret));
+                    prev_val_cache.insert(field.name.clone(), Value::from(ret));
+                }
+                Err(emsg) => {
+                    parsed_data.insert(field.name.clone(), Value::from(format!("eval_float error: {}", emsg)));
+                }
+            }
+        } else if let Some(evals) = &field.eval_string {
+            let eval_ret = eval_float_with_context_mut(evals, &mut eval_context);
+            match eval_ret {
+                Ok(ret) => {
+                    parsed_data.insert(field.name.clone(), Value::from(ret.clone()));
+                    prev_val_cache.insert(field.name.clone(), Value::from(ret));
+                }
+                Err(emsg) => {
+                    parsed_data.insert(field.name.clone(), Value::from(format!("eval_str error: {}", emsg)));
+                }
+            }
+        } else {
+            parsed_data.insert(field.name.clone(), Value::from(value.clone()));
+            prev_val_cache.insert(field.name.clone(), Value::from(value.clone()));
+        }
     }
-    val_cache.insert(field.name.clone(), value);
     Ok(new_bit_offset)
 }
 
@@ -214,7 +262,7 @@ pub fn parse_binary(
     data: &[u8],
     schema: &[Field],
     dry_run: bool,
-    val_cache: &mut HashMap<String, Number>,
+    prev_val_cache: &mut HashMap<String, Value>,
 ) -> Result<(Value, usize), (Value, String)> {
     let mut bit_offset = 0;
     let mut parsed_data = Map::new();
@@ -222,7 +270,7 @@ pub fn parse_binary(
     for field in schema {
         println!("proc field {:?}", field);
         if field.field_type.is_some() || field.loop_count.is_some() { //normal fields or loop
-            let (field_bits, loop_count_option) = get_field_size(&field, val_cache);
+            let (field_bits, loop_count_option) = get_field_size(&field, prev_val_cache);
             if loop_count_option.is_none() && field_bits == 0 {
                 println!("Invalid field - not a loop and no bits to parse: {:?}", field);
                 continue;
@@ -231,7 +279,7 @@ pub fn parse_binary(
                 println!("loop_count: {}", loop_count);
                 let mut output_array:Vec<Value> = vec![];
                 for _ in 0..loop_count {
-                    let (nested_data, nested_bits) = parse_binary(&data[(bit_offset / 8)..], field.fields.as_ref().unwrap(), dry_run, val_cache)?;
+                    let (nested_data, nested_bits) = parse_binary(&data[(bit_offset / 8)..], field.fields.as_ref().unwrap(), dry_run, prev_val_cache)?;
                     bit_offset += nested_bits;
                     output_array.push(nested_data);
                 }
@@ -259,10 +307,10 @@ pub fn parse_binary(
                         _ => {panic!("unsupported field_type: {}", field_type)},
                 };
                 println!("final_value: {:?}", final_value);
-                bit_offset = process_field(data, field, dry_run, final_value, bit_offset, val_cache, &mut parsed_data)?;
+                bit_offset = process_field(data, field, dry_run, final_value, bit_offset, prev_val_cache, &mut parsed_data)?;
             }
         } else if let Some(fields) = &field.fields { //nested fields
-            let (nested_data, nested_bits) = parse_binary(&data[(bit_offset / 8)..], fields, dry_run, val_cache)?;
+            let (nested_data, nested_bits) = parse_binary(&data[(bit_offset / 8)..], fields, dry_run, prev_val_cache)?;
             bit_offset += nested_bits;
             parsed_data.insert(field.name.clone(), nested_data);
         } else {
@@ -282,6 +330,7 @@ pub fn hex_to_bin(hex: &str) -> Vec<u8>
 
 #[cfg(test)]
 mod tests {
+    use evalexpr::{ContextWithMutableVariables, eval, eval_int, eval_int_with_context, HashMapContext};
     use once_cell::sync::Lazy;
     use super::*;
     use serde_json::json;
@@ -500,7 +549,18 @@ mod tests {
     }
 
     ////////////////// qstarz_ble tests
-    static qstarz_ble_schema: Lazy<Schema> = Lazy::new(|| {
+    /*
+    ref formula:
+    int tmp_lat = dLat / 100;
+    int tmp_lon = dLon / 100;
+    dLat = tmp_lat + (dLat - tmp_lat * 100) / 60.0;
+    dLon = tmp_lon + (dLon - tmp_lon * 100) / 60.0;
+    */
+    const qstarz_lat_lon_DDDMM_MMMM_formula:&str = r#"
+    tmp_lat = value_float / 100;
+    tmp_lat + (value_float - tmp_lat * 100) / 60.0
+    "#;
+    const qstarz_ble_schema: Lazy<Schema> = Lazy::new(|| {
         load_schema(
             json!({
                 "fields": [
@@ -513,8 +573,8 @@ mod tests {
                     },
                     { "name": "rcr", "type": "u8" },
                     { "name": "millisecond", "type": "u16" },
-                    { "name": "latitude", "type": "f64" },
-                    { "name": "longitude", "type": "f64" },
+                    { "name": "latitude", "type": "f64", "eval_float": qstarz_lat_lon_DDDMM_MMMM_formula},
+                    { "name": "longitude", "type": "f64", "eval_float": qstarz_lat_lon_DDDMM_MMMM_formula },
                     { "name": "timestamp_s", "type": "u32" },
                     { "name": "float_speed_kmh", "type": "f32" },
                     { "name": "float_height_m", "type": "f32" },
@@ -660,8 +720,8 @@ mod tests {
                 "g_sensor_z": 114,
                 "hdop": 1.7899999618530273,
                 "heading_degrees": 100.16000366210938,
-                "latitude": 2504.771239,
-                "longitude": 12122.366071,
+                "latitude": 25.04771239,
+                "longitude": 121.22366071,
                 "max_snr": 19,
                 "millisecond": 200,
                 "rcr": 84,
@@ -674,6 +734,16 @@ mod tests {
 
         //////////////////////////
 
+    }
+
+    #[test]
+    fn test_eval_expr()
+    {
+        let mut eval_context = HashMapContext::new();
+        eval_context.set_value("a".to_string(), 1.into());
+        assert_eq!(eval_int_with_context("a + 1 + 2 + 3", &eval_context), Ok(7));
+
+        //TODO: make json case eval int/float/str
     }
 
     #[test]
@@ -701,8 +771,8 @@ mod tests {
                 "fix_status": "3D",
                 "rcr": 84,
                 "millisecond": 400,
-                "latitude": 2504.773285,
-                "longitude": 12122.366352,
+                "latitude": 25.047732850000003,
+                "longitude": 121.22366351999999,
                 "timestamp_s": 1625223814,
                 "float_speed_kmh": 3.1854400634765625,
                 "float_height_m": 307.55999755859375,

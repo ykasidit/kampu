@@ -1,8 +1,9 @@
+use std::any::{Any, TypeId};
 use serde::Deserialize;
 use serde_json::{Map, Value, Number};
 use std::collections::{HashMap, HashSet};
 use bitter::{BitReader, LittleEndianReader};
-use evalexpr::{ContextWithMutableVariables, eval_float, eval_float_with_context, eval_float_with_context_mut, eval_int, eval_int_with_context, eval_string, eval_string_with_context, HashMapContext};
+use evalexpr::{ContextWithMutableVariables, eval_float, eval_float_with_context, eval_float_with_context_mut, eval_int, eval_int_with_context, eval_string, eval_string_with_context, eval_with_context_mut, HashMapContext};
 
 #[derive(Deserialize, Debug)]
 struct Field {
@@ -14,9 +15,7 @@ struct Field {
     loop_count: Option<Value>,
     fields: Option<Vec<Field>>,
     optional: Option<bool>,
-    eval_int: Option<String>,
-    eval_float: Option<String>,
-    eval_string: Option<String>,
+    eval: Option<String>
 }
 
 #[derive(Deserialize, Debug)]
@@ -208,7 +207,8 @@ pub fn process_field(data: &[u8], field: &Field, dry_run: bool, value: Number, b
             parsed_data.insert(field.name.clone(), Value::String("unknown".to_string()));
         }
     } else {
-        //check eval expression
+
+        //make eval context
         let mut eval_context = HashMapContext::new();
         if value.is_f64() {
             eval_context.set_value("value_float".to_string(), value.as_f64().unwrap().into());
@@ -217,42 +217,33 @@ pub fn process_field(data: &[u8], field: &Field, dry_run: bool, value: Number, b
         }
         eval_context.set_value("value_string".to_string(), value.to_string().into());
 
-        if let Some(evals) = &field.eval_int {
-            let eval_ret = eval_float_with_context_mut(evals, &mut eval_context);
-            match eval_ret {
-                Ok(ret) => {
-                    parsed_data.insert(field.name.clone(), Value::from(ret));
-                    prev_val_cache.insert(field.name.clone(), Value::from(ret));
-                }
-                Err(emsg) => {
-                    parsed_data.insert(field.name.clone(), Value::from(format!("eval_int error: {}", emsg)));
-                }
-            }
-        } else if let Some(evas) = &field.eval_float {
-            let eval_ret = eval_float_with_context_mut(evas, &mut eval_context);
-            match eval_ret {
-                Ok(ret) => {
-                    parsed_data.insert(field.name.clone(), Value::from(ret));
-                    prev_val_cache.insert(field.name.clone(), Value::from(ret));
-                }
-                Err(emsg) => {
-                    parsed_data.insert(field.name.clone(), Value::from(format!("eval_float error: {}", emsg)));
-                }
-            }
-        } else if let Some(evals) = &field.eval_string {
-            let eval_ret = eval_float_with_context_mut(evals, &mut eval_context);
-            match eval_ret {
-                Ok(ret) => {
-                    parsed_data.insert(field.name.clone(), Value::from(ret.clone()));
-                    prev_val_cache.insert(field.name.clone(), Value::from(ret));
-                }
-                Err(emsg) => {
-                    parsed_data.insert(field.name.clone(), Value::from(format!("eval_str error: {}", emsg)));
+        match &field.eval {
+            Some(evals) => {
+                let eval_ret = eval_with_context_mut(evals.as_str(), &mut eval_context);
+                match eval_ret {
+                    Ok(ret) => {
+                        println!("eval ret: {:?}", ret);
+                        let mut ret_serde_value = if ret.is_float() {
+                            Value::from(ret.as_float().unwrap())
+                        } else if ret.is_int() {
+                            Value::from(ret.as_int().unwrap())
+                        } else if ret.is_boolean() {
+                            Value::from(ret.as_boolean().unwrap())
+                        } else {
+                            Value::from(ret.to_string())
+                        };
+                        parsed_data.insert(field.name.clone(), ret_serde_value.clone());
+                        prev_val_cache.insert(field.name.clone(), ret_serde_value.clone());
+                    }
+                    Err(emsg) => {
+                        parsed_data.insert(field.name.clone()+"_eval_error", Value::from(format!("eval error: {}", emsg)));
+                    }
                 }
             }
-        } else {
-            parsed_data.insert(field.name.clone(), Value::from(value.clone()));
-            prev_val_cache.insert(field.name.clone(), Value::from(value.clone()));
+            None => {
+                parsed_data.insert(field.name.clone(), Value::from(value.clone()));
+                prev_val_cache.insert(field.name.clone(), Value::from(value.clone()));
+            }
         }
     }
     Ok(new_bit_offset)
@@ -355,7 +346,6 @@ mod tests {
                 { "name": "millisecond", "type": "u16_le" }
             ]
         });
-
         let data = parse_hex_string("01 00 E8 03");
 
         let schema = load_schema(schema_json);
@@ -573,8 +563,8 @@ mod tests {
                     },
                     { "name": "rcr", "type": "u8" },
                     { "name": "millisecond", "type": "u16" },
-                    { "name": "latitude", "type": "f64", "eval_float": qstarz_lat_lon_DDDMM_MMMM_formula},
-                    { "name": "longitude", "type": "f64", "eval_float": qstarz_lat_lon_DDDMM_MMMM_formula },
+                    { "name": "latitude", "type": "f64", "eval": qstarz_lat_lon_DDDMM_MMMM_formula },
+                    { "name": "longitude", "type": "f64", "eval": qstarz_lat_lon_DDDMM_MMMM_formula },
                     { "name": "timestamp_s", "type": "u32" },
                     { "name": "float_speed_kmh", "type": "f32" },
                     { "name": "float_height_m", "type": "f32" },
@@ -743,7 +733,48 @@ mod tests {
         eval_context.set_value("a".to_string(), 1.into());
         assert_eq!(eval_int_with_context("a + 1 + 2 + 3", &eval_context), Ok(7));
 
-        //TODO: make json case eval int/float/str
+        //cases for  eval int/float/str
+        let schema_json = json!({
+            "fields": [
+                { "name": "sth", "type": "u8", "eval": "value_int + 1"},
+            ]
+        });
+        let data = parse_hex_string("01");
+        let schema = load_schema(schema_json);
+        let mut previous_values = HashMap::new();
+        let (parsed_json, bit_offset) = parse_binary(&data, &schema.fields, false, &mut previous_values).unwrap();
+        assert_eq!(bit_offset, 8);
+        assert_eq!(parsed_json, json!({
+            "sth": 2,
+        }));
+
+        let schema_json = json!({
+            "fields": [
+                { "name": "sth", "type": "u8", "eval": "value_int + 1.0"},
+            ]
+        });
+        let data = parse_hex_string("01");
+        let schema = load_schema(schema_json);
+        let mut previous_values = HashMap::new();
+        let (parsed_json, bit_offset) = parse_binary(&data, &schema.fields, false, &mut previous_values).unwrap();
+        assert_eq!(bit_offset, 8);
+        assert_eq!(parsed_json, json!({
+            "sth": 2.0,
+        }));
+
+        let schema_json = json!({
+            "fields": [
+                { "name": "sth", "type": "u8", "eval": "math::pow(value_int, 2)"},
+            ]
+        });
+        let data = parse_hex_string("0A");
+        let schema = load_schema(schema_json);
+        let mut previous_values = HashMap::new();
+        let (parsed_json, bit_offset) = parse_binary(&data, &schema.fields, false, &mut previous_values).unwrap();
+        assert_eq!(bit_offset, 8);
+        assert_eq!(parsed_json, json!({
+            "sth": 100.0,
+        }));
     }
 
     #[test]

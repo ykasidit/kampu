@@ -1,7 +1,11 @@
 [package]
 name = "kampu"
-version = "0.1.0"
-edition = "2021"
+version = "0.1.1"
+license = "Apache-2.0"
+description = "Generic byte array parser function where you can define the structure/tree of the bytes in JSON, send it a byte array and get the parsed output in JSON."
+repository = "https://github.com/ykasidit/kampu"
+readme = "README.md"
+
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

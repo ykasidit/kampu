@@ -10,7 +10,6 @@ Usage
 
 See tests towards the bottom of the `tree.rs` file, example:
 <pre>
- #[test]
     fn test_simple_packet() {
         let schema_json = json!({
             "branches": [

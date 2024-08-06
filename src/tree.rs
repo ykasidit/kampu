@@ -185,7 +185,7 @@ pub fn process_field(data: &[u8], field: &Branch, dry_run: bool, value: Number, 
                     println!("key matched: {} obj0", key);
                     if let Some(fields) = obj.get("branches").and_then(|f| f.as_array()) {
                         let nested_fields: Vec<Branch> = serde_json::from_value(Value::Array(fields.clone())).unwrap();
-                        let (mut nested_data, nested_bits) = parse_tree(&data[(bit_offset / 8)..], &nested_fields, dry_run, prev_val_cache)?;
+                        let (mut nested_data, nested_bits) = parse_schema(&data[(bit_offset / 8)..], &nested_fields, dry_run, prev_val_cache)?;
                         new_bit_offset += nested_bits;
                         if nested_data.is_object() && obj.contains_key("name") {
                             let mut no = nested_data.as_object_mut().unwrap();
@@ -251,7 +251,7 @@ pub fn process_field(data: &[u8], field: &Branch, dry_run: bool, value: Number, 
     Ok(new_bit_offset)
 }
 
-pub fn parse_tree(
+pub fn parse_schema(
     data: &[u8],
     schema_fields: &[Branch],
     dry_run: bool,
@@ -271,7 +271,7 @@ pub fn parse_tree(
                 println!("loop_count: {}", loop_count);
                 let mut output_array:Vec<Value> = vec![];
                 for _ in 0..loop_count {
-                    let (nested_data, nested_bits) = parse_tree(&data[(bit_offset / 8)..], field.branches.as_ref().unwrap(), dry_run, prev_val_cache)?;
+                    let (nested_data, nested_bits) = parse_schema(&data[(bit_offset / 8)..], field.branches.as_ref().unwrap(), dry_run, prev_val_cache)?;
                     bit_offset += nested_bits;
                     output_array.push(nested_data);
                 }
@@ -302,7 +302,7 @@ pub fn parse_tree(
                 bit_offset = process_field(data, field, dry_run, final_value, bit_offset, prev_val_cache, &mut parsed_data)?;
             }
         } else if let Some(fields) = &field.branches { //nested fields
-            let (nested_data, nested_bits) = parse_tree(&data[(bit_offset / 8)..], fields, dry_run, prev_val_cache)?;
+            let (nested_data, nested_bits) = parse_schema(&data[(bit_offset / 8)..], fields, dry_run, prev_val_cache)?;
             bit_offset += nested_bits;
             parsed_data.insert(field.name.clone(), nested_data);
         } else {
@@ -312,12 +312,9 @@ pub fn parse_tree(
     Ok((Value::Object(parsed_data), bit_offset))
 }
 
-pub fn hex_to_bin(hex: &str) -> Vec<u8>
-{
-    let hex_trimmed = hex.trim();
-    let hex_no_space =  str::replace(hex_trimmed, " ", "").replace("\n","").replace("\r", "");
-    println!("hex_no_space: {}", hex_no_space);
-    hex::decode(hex_no_space).expect("Decoding failed")
+
+pub fn schema_to_tree(schema_json: Value) -> Tree {
+    serde_json::from_value(schema_json).expect("Unable to parse JSON schema")
 }
 
 #[cfg(test)]
@@ -325,39 +322,8 @@ mod tests {
     use evalexpr::{ContextWithMutableVariables, eval_int_with_context, HashMapContext};
     use once_cell::sync::Lazy;
     use serde_json::json;
-    use crate::forest::{forest_parse_tree, forest_add_tree};
+    use crate::utils::hex_to_bin;
     use super::*;
-
-    fn parse_hex_string(hex_string: &str) -> Vec<u8> {
-        hex_string
-            .split_whitespace()
-            .map(|s| u8::from_str_radix(s, 16).unwrap())
-            .collect()
-    }
-
-    fn load_schema(schema_json: Value) -> Tree {
-        serde_json::from_value(schema_json).expect("Unable to parse JSON schema")
-    }
-
-    #[test]
-    fn test_simple_packet() {
-        let schema_json = json!({
-            "branches": [
-                { "name": "fix_status", "type": "u8" },
-                { "name": "rcr", "type": "u8" },
-                { "name": "millisecond", "type": "u16_le" }
-            ]
-        });
-        let data = parse_hex_string("01 00 E8 03");
-        let schema = load_schema(schema_json);
-        forest_add_tree(1, schema);
-        let parsed_json = forest_parse_tree(1, &data);
-        assert_eq!(parsed_json, json!({
-            "fix_status": 1,
-            "rcr": 0,
-            "millisecond": 1000
-        }));
-    }
 
     #[test]
     fn test_nested_packet() {
@@ -371,11 +337,11 @@ mod tests {
             ]
         });
 
-        let data = parse_hex_string("01 02 E8 03");
+        let data = hex_to_bin("01 02 E8 03");
 
-        let schema = load_schema(schema_json);
+        let schema = schema_to_tree(schema_json);
         let mut previous_values = HashMap::new();
-        let (parsed_json, _) = parse_tree(&data, &schema.branches, false, &mut previous_values).unwrap();
+        let (parsed_json, _) = parse_schema(&data, &schema.branches, false, &mut previous_values).unwrap();
 
         assert_eq!(parsed_json, json!({
             "header": 1,
@@ -397,11 +363,11 @@ mod tests {
             ]
         });
 
-        let data = parse_hex_string("01");
+        let data = hex_to_bin("01");
 
-        let schema = load_schema(schema_json);
+        let schema = schema_to_tree(schema_json);
         let mut previous_values = HashMap::new();
-        let (parsed_json, _) = parse_tree(&data, &schema.branches, false, &mut previous_values).unwrap();
+        let (parsed_json, _) = parse_schema(&data, &schema.branches, false, &mut previous_values).unwrap();
         assert_eq!(parsed_json, json!({
             "status": "Active"
         }));
@@ -419,11 +385,11 @@ mod tests {
             ]
         });
 
-        let data = parse_hex_string("03 FF 01 02 03");
+        let data = hex_to_bin("03 FF 01 02 03");
 
-        let schema = load_schema(schema_json);
+        let schema = schema_to_tree(schema_json);
         let mut previous_values = HashMap::new();
-        let (parsed_json, _) = parse_tree(&data, &schema.branches, false, &mut previous_values).unwrap();
+        let (parsed_json, _) = parse_schema(&data, &schema.branches, false, &mut previous_values).unwrap();
 
         assert_eq!(parsed_json, json!({
             "count": 3,
@@ -452,11 +418,11 @@ mod tests {
                 }}
             ]
         });
-        let data = parse_hex_string("01 02 E8 03");
+        let data = hex_to_bin("01 02 E8 03");
 
-        let schema = load_schema(schema_json);
+        let schema = schema_to_tree(schema_json);
         let mut previous_values = HashMap::new();
-        let (parsed_json, _) = parse_tree(&data, &schema.branches, false, &mut previous_values).unwrap();
+        let (parsed_json, _) = parse_schema(&data, &schema.branches, false, &mut previous_values).unwrap();
 
         assert_eq!(parsed_json, json!({
             "type": {
@@ -477,9 +443,9 @@ mod tests {
             ]
         });
 
-        let schema = load_schema(schema_json);
+        let schema = schema_to_tree(schema_json);
         let mut previous_values = HashMap::new();
-        let (parsed_json, _) = parse_tree(&[], &schema.branches, true, &mut previous_values).unwrap();
+        let (parsed_json, _) = parse_schema(&[], &schema.branches, true, &mut previous_values).unwrap();
         assert_eq!(parsed_json, json!({
             "fix_status": 0,
             "millisecond": 0,
@@ -507,7 +473,7 @@ mod tests {
             ]
         });
 
-        let data = parse_hex_string(r#"
+        let data = hex_to_bin(r#"
         fe ff
         01 00 00 00
         04 00
@@ -518,9 +484,9 @@ mod tests {
         01
         "#);
 
-        let schema = load_schema(coral_reef_structure_json);
+        let schema = schema_to_tree(coral_reef_structure_json);
         let mut previous_values = HashMap::new();
-        let (parsed_json, _) = parse_tree(&data, &schema.branches, false, &mut previous_values).unwrap();
+        let (parsed_json, _) = parse_schema(&data, &schema.branches, false, &mut previous_values).unwrap();
 
         assert_eq!(parsed_json, json!({
             "n_colonies": 1,
@@ -551,7 +517,7 @@ mod tests {
     tmp_lat + (value_float - tmp_lat * 100) / 60.0
     "#;
     const qstarz_ble_schema: Lazy<Tree> = Lazy::new(|| {
-        load_schema(
+        schema_to_tree(
             json!({
                 "branches": [
                     { "name": "fix_status", "type": "u8",
@@ -628,7 +594,7 @@ mod tests {
         "#
         );
         let mut val_cache = HashMap::new();
-        let (parsed_json, _) = parse_tree(&data, &qstarz_ble_schema.branches, false, &mut val_cache).unwrap();
+        let (parsed_json, _) = parse_schema(&data, &qstarz_ble_schema.branches, false, &mut val_cache).unwrap();
         println!("parsed_json: {}", serde_json::to_string_pretty(&parsed_json).unwrap());
         assert_eq!(
             parsed_json,
@@ -694,7 +660,7 @@ mod tests {
         "#
         );
         let mut val_cache = HashMap::new();
-        let (parsed_json, _) = parse_tree(&data, &qstarz_ble_schema.branches, false, &mut val_cache).err().unwrap();
+        let (parsed_json, _) = parse_schema(&data, &qstarz_ble_schema.branches, false, &mut val_cache).err().unwrap();
         println!("parsed_json: {}", serde_json::to_string_pretty(&parsed_json).unwrap());
         assert_eq!(
             parsed_json,
@@ -739,10 +705,10 @@ mod tests {
                 { "name": "sth", "type": "u8", "eval": "value_int + 1"},
             ]
         });
-        let data = parse_hex_string("01");
-        let schema = load_schema(schema_json);
+        let data = hex_to_bin("01");
+        let schema = schema_to_tree(schema_json);
         let mut previous_values = HashMap::new();
-        let (parsed_json, bit_offset) = parse_tree(&data, &schema.branches, false, &mut previous_values).unwrap();
+        let (parsed_json, bit_offset) = parse_schema(&data, &schema.branches, false, &mut previous_values).unwrap();
         assert_eq!(bit_offset, 8);
         assert_eq!(parsed_json, json!({
             "sth": 2,
@@ -753,10 +719,10 @@ mod tests {
                 { "name": "sth", "type": "u8", "eval": "value_int + 1.0"},
             ]
         });
-        let data = parse_hex_string("01");
-        let schema = load_schema(schema_json);
+        let data = hex_to_bin("01");
+        let schema = schema_to_tree(schema_json);
         let mut previous_values = HashMap::new();
-        let (parsed_json, bit_offset) = parse_tree(&data, &schema.branches, false, &mut previous_values).unwrap();
+        let (parsed_json, bit_offset) = parse_schema(&data, &schema.branches, false, &mut previous_values).unwrap();
         assert_eq!(bit_offset, 8);
         assert_eq!(parsed_json, json!({
             "sth": 2.0,
@@ -767,10 +733,10 @@ mod tests {
                 { "name": "sth", "type": "u8", "eval": "math::pow(value_int, 2)"},
             ]
         });
-        let data = parse_hex_string("0A");
-        let schema = load_schema(schema_json);
+        let data = hex_to_bin("0A");
+        let schema = schema_to_tree(schema_json);
         let mut previous_values = HashMap::new();
-        let (parsed_json, bit_offset) = parse_tree(&data, &schema.branches, false, &mut previous_values).unwrap();
+        let (parsed_json, bit_offset) = parse_schema(&data, &schema.branches, false, &mut previous_values).unwrap();
         assert_eq!(bit_offset, 8);
         assert_eq!(parsed_json, json!({
             "sth": 100.0,
@@ -794,7 +760,7 @@ mod tests {
         "#
         );
         let mut val_cache = HashMap::new();
-        let (parsed_json, _) = parse_tree(&data, &qstarz_ble_schema.branches, false, &mut val_cache).unwrap();
+        let (parsed_json, _) = parse_schema(&data, &qstarz_ble_schema.branches, false, &mut val_cache).unwrap();
         println!("parsed_json: {}", serde_json::to_string_pretty(&parsed_json).unwrap());
         assert_eq!(
             parsed_json,

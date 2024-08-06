@@ -5,6 +5,32 @@ Generic byte array parser function where you can define the structure/tree of th
 
 'Kampu' is the name a large tree common in Thailand, it has very large branches that could be allegorical to the complex bit/byte/loops/matches that this parser aims to handle.
 
+Usage
+-----
+
+See tests towards the bottom of the `tree.rs` file, example:
+<pre>
+ #[test]
+    fn test_simple_packet() {
+        let schema_json = json!({
+            "branches": [
+                { "name": "fix_status", "type": "u8" },
+                { "name": "rcr", "type": "u8" },
+                { "name": "millisecond", "type": "u16_le" }
+            ]
+        });
+        let data = parse_hex_string("01 00 E8 03");
+        let schema = load_schema(schema_json);
+        forest_add_tree(1, schema);
+        let parsed_json = forest_parse_tree(1, &data);
+        assert_eq!(parsed_json, json!({
+            "fix_status": 1,
+            "rcr": 0,
+            "millisecond": 1000
+        }));
+    }
+</pre>
+
 
 History
 -------

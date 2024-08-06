@@ -1,4 +1,4 @@
-mod forest;
-mod tree;
-mod utils;
+pub mod forest;
+pub mod tree;
+pub mod utils;
 

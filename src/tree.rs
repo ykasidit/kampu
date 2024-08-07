@@ -344,6 +344,33 @@ fn test_loop_fields() {
 }
 
 #[test]
+fn test_loop_static_count() {
+    let schema_json = json!({
+        "branches": [
+            { "name": "reserved", "type": "u8" },
+            { "name": "items", "loop_count": 3, "branches": [
+                { "name": "item", "type": "u8" }
+            ]}
+        ]
+    });
+
+    let data = hex_to_bin("FE 01 02 03");
+
+    let schema = schema_to_tree(schema_json);
+    let mut previous_values = HashMap::new();
+    let (parsed_json, _) = parse_schema(&data, &schema.branches, false, &mut previous_values).unwrap();
+
+    assert_eq!(parsed_json, json!({
+        "reserved": 254,
+        "items": [
+            { "item": 1 },
+            { "item": 2 },
+            { "item": 3 }
+        ]
+    }));
+}
+
+#[test]
 fn test_match_to_nested_packet() {
     let schema_json = json!({
         "branches": [

@@ -3,7 +3,7 @@ extern crate kampu;
 use once_cell::sync::Lazy;
 use serde_json::{json, Value};
 
-use kampu::forest::{parse_tree, plant_tree};
+use kampu::forest::{is_tree_planted, parse_tree, plant_tree};
 use kampu::utils::hex_to_bin;
 
 ////////////////// qstarz_ble tests
@@ -76,11 +76,17 @@ const QSTARZ_BLE_TREE_SCHEMA: Lazy<Value> = Lazy::new(|| {
             })
 });
 
+fn setup_parse_trees() {
+    if !is_tree_planted(QSTARZ_BLE_SCHEMA_TREE_ID) {
+        plant_tree(QSTARZ_BLE_SCHEMA_TREE_ID, QSTARZ_BLE_TREE_SCHEMA.clone());
+    }
+}
+
 
 #[test]
 fn test_qstarz_ble_packet_gps_not_fixed()
 {
-    plant_tree(QSTARZ_BLE_SCHEMA_TREE_ID, QSTARZ_BLE_TREE_SCHEMA.clone());
+    setup_parse_trees();
     /*
     19:03:33.506 - Characteristic (6E400004-B5A3-F393-E0A9-E50E24DCCA9E) notified: <01547801 00000000 00000080 00000000 00000080> 	01=GPS is not fixed
     19:03:33.506 - Characteristic (6E400004-B5A3-F393-E0A9-E50E24DCCA9E) notified: <85f2de60 61a6fd3f 00000000 14aeca42 6800a9ff>
@@ -148,7 +154,7 @@ fn test_qstarz_ble_packet_gps_not_fixed()
 #[test]
 fn test_qstarz_ble_packet_gps_fixed_wo_gsv()
 {
-    plant_tree(QSTARZ_BLE_SCHEMA_TREE_ID, QSTARZ_BLE_TREE_SCHEMA.clone());
+    setup_parse_trees();
     /*
     19:03:34.403 - Characteristic (6E400004-B5A3-F393-E0A9-E50E24DCCA9E) notified: <0354c800 cd94d6df 8a91a340 821e6adb 2eadc740>  	03=GPS is fixed
     19:03:34.403 - Characteristic (6E400004-B5A3-F393-E0A9-E50E24DCCA9E) notified: <86f2de60 3a924340 10c89943 ec51c842 610077ff>
@@ -195,7 +201,7 @@ fn test_qstarz_ble_packet_gps_fixed_wo_gsv()
 #[test]
 fn test_qstarz_ble_packet_gps_fixed_w_gsv()
 {
-    plant_tree(QSTARZ_BLE_SCHEMA_TREE_ID, QSTARZ_BLE_TREE_SCHEMA.clone());
+    setup_parse_trees();
     /*
     19:03:34.555 - Characteristic (6E400004-B5A3-F393-E0A9-E50E24DCCA9E) notified: <03549001 faf202ec 8b91a340 69519fe4 2eadc740>  	03=GPS is fixed
     19:03:34.555 - Characteristic (6E400004-B5A3-F393-E0A9-E50E24DCCA9E) notified: <86f2de60 40de4b40 aec79943 5c8fd442 480082ff>

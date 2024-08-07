@@ -5,13 +5,17 @@ use serde_json::Value;
 
 use crate::tree::{parse_schema, schema_to_tree, Tree};
 
-static PLANTED_TREES:Lazy<Mutex<HashMap<u64, Tree>>> = Lazy::new(|| {
+pub static PLANTED_PARSE_TREES:Lazy<Mutex<HashMap<u64, Tree>>> = Lazy::new(|| {
     let hm:HashMap<u64, Tree> = HashMap::new();
     Mutex::new(hm)
 });
 
+pub fn is_tree_planted(unique_tree_id:u64) -> bool {
+    PLANTED_PARSE_TREES.lock().unwrap().contains_key(&unique_tree_id)
+}
+
 pub fn plant_tree_schema(unique_tree_id:u64, schema: Tree) -> i32 {
-    let mut hm = PLANTED_TREES.lock().unwrap();
+    let mut hm = PLANTED_PARSE_TREES.lock().unwrap();
     hm.insert(unique_tree_id, schema);
     0
 }
@@ -27,7 +31,7 @@ pub fn parse_tree(
 {
     let schema:Tree = {
         //use this block to quickly get, clone and release the lock on the mutex-locked map
-        let reg_map = PLANTED_TREES.lock().unwrap();
+        let reg_map = PLANTED_PARSE_TREES.lock().unwrap();
         let sr = reg_map.get(&unique_tree_id).ok_or(format!("No tree with unique_tree_id {} found", unique_tree_id))?;
         let so = sr.clone();
         so

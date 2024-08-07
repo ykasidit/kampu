@@ -15,8 +15,8 @@ dLat = tmp_lat + (dLat - tmp_lat * 100) / 60.0;
 dLon = tmp_lon + (dLon - tmp_lon * 100) / 60.0;
 */
 const QSTARZ_LAT_LON_DDDMM_MMMM_FORMULA_EVAL_STR:&str = r#"
-    tmp_lat = value_float / 100;
-    tmp_lat + (value_float - tmp_lat * 100) / 60.0
+    tmp_lat = value_float / 100.0;
+    tmp_lat + (value_float - tmp_lat * 100.0) / 60.0
     "#;
 const QSTARZ_G_SENSOR_EVAL_STR:&str = "value_int / 256.0";
 const QSTARZ_BLE_SCHEMA_TREE_ID:u64 = 1;

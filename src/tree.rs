@@ -30,6 +30,7 @@ pub struct Tree {
     pub branches: Vec<Branch>,
 }
 
+const TYPE_FLAG_USE_PREV_FIELD:&str = "u0";
 
 fn read_bits(data: &[u8], bit_offset:usize, num_bits: u32) -> Result<(u64, usize), String> {
     let n_bytes_to_skip = bit_offset / 8;
@@ -198,11 +199,17 @@ pub fn parse_schema(
     let mut parsed_data = Map::new();
     for field in schema_fields {
         println!("proc field {:?}", field);
+        let mut prev_field_refer_val:Option<Number> = None;
         if field.field_type.is_some() || field.loop_count.is_some() { //normal fields or loop
             let (field_bits, loop_count_option) = get_field_size(&field, prev_val_cache);
             if loop_count_option.is_none() && field_bits == 0 {
-                println!("Invalid field - not a loop and no bits to parse: {:?}", field);
-                continue;
+                if field.field_type.clone().unwrap() == TYPE_FLAG_USE_PREV_FIELD && prev_val_cache.contains_key(&field.name) {
+                    println!("got TYPE_FLAG_USE_PREV_FIELD and prev_val_cache has mathing field name");
+                    prev_field_refer_val = Some(prev_val_cache.get(&field.name).unwrap().clone().as_number().unwrap().clone());
+                } else {
+                    println!("Invalid field - not a loop and no bits to parse: {:?}", field);
+                    continue;
+                }
             }
             if let Some(loop_count) = loop_count_option {  //loop around files
                 println!("loop_count: {}", loop_count);
@@ -214,26 +221,31 @@ pub fn parse_schema(
                 }
                 parsed_data.insert(field.name.clone(), Value::Array(output_array));
             } else {
-                let field_type = &field.field_type.clone().unwrap();
-                let (value, new_bit_offset) = if !dry_run {read_bits(data, bit_offset, field_bits).map_err(|err| (Value::Object(parsed_data.clone()), err))?} else {(0, bit_offset as usize + field_bits as usize)};
-                bit_offset = new_bit_offset;
-                let final_value:Number = match field_type.as_str() {
-                    "u8" | "u8_le" => Number::from(value as u8 as u32),
-                    "u8_be" => Number::from(value as u8),
-                    "u16" | "u16_le" => Number::from(u16::from_le_bytes((value as u16).to_le_bytes())),
-                    "u16_be" => Number::from(u16::from_be_bytes((value as u16).to_be_bytes())),
-                    "u32" | "u32_le" => Number::from(u32::from_le_bytes((value as u32).to_le_bytes())),
-                    "u32_be" => Number::from(u32::from_be_bytes((value as u32).to_be_bytes())),
-                    "u64" | "u64_le" => Number::from(u64::from_le_bytes((value as u64).to_le_bytes())),
-                    "u64_be" => Number::from(u64::from_be_bytes((value as u64).to_be_bytes())),
-                    "f32" | "f32_le" => Number::from_f64(f32::from_le_bytes((value as u32).to_le_bytes()) as f64).unwrap(),
-                    "f32_be" => Number::from_f64(f32::from_be_bytes((value as u32).to_be_bytes()) as f64).unwrap(),
-                    "f64" | "f64_le" => Number::from_f64(f64::from_le_bytes((value as u64).to_le_bytes()) as f64).unwrap(),
-                    "f64_be" => Number::from_f64(f64::from_be_bytes((value as u64).to_be_bytes()) as f64).unwrap(),
-                    "i16" | "i16_le" => Number::from(i16::from_le_bytes((value as u16).to_le_bytes())),
-                    "i16_be" => Number::from(i16::from_be_bytes((value as u16).to_be_bytes())),
-                    t if t.starts_with('u') => Number::from(value),
-                    _ => {panic!("unsupported field_type: {}", field_type)},
+                let final_value= if prev_field_refer_val.is_some() {
+                    prev_field_refer_val.unwrap()
+                } else {
+                    let field_type = &field.field_type.clone().unwrap();
+                    let (value, new_bit_offset) = if !dry_run { read_bits(data, bit_offset, field_bits).map_err(|err| (Value::Object(parsed_data.clone()), err))? } else { (0, bit_offset as usize + field_bits as usize) };
+                    bit_offset = new_bit_offset;
+                    let final_value_cand: Number = match field_type.as_str() {
+                        "u8" | "u8_le" => Number::from(value as u8 as u32),
+                        "u8_be" => Number::from(value as u8),
+                        "u16" | "u16_le" => Number::from(u16::from_le_bytes((value as u16).to_le_bytes())),
+                        "u16_be" => Number::from(u16::from_be_bytes((value as u16).to_be_bytes())),
+                        "u32" | "u32_le" => Number::from(u32::from_le_bytes((value as u32).to_le_bytes())),
+                        "u32_be" => Number::from(u32::from_be_bytes((value as u32).to_be_bytes())),
+                        "u64" | "u64_le" => Number::from(u64::from_le_bytes((value as u64).to_le_bytes())),
+                        "u64_be" => Number::from(u64::from_be_bytes((value as u64).to_be_bytes())),
+                        "f32" | "f32_le" => Number::from_f64(f32::from_le_bytes((value as u32).to_le_bytes()) as f64).unwrap(),
+                        "f32_be" => Number::from_f64(f32::from_be_bytes((value as u32).to_be_bytes()) as f64).unwrap(),
+                        "f64" | "f64_le" => Number::from_f64(f64::from_le_bytes((value as u64).to_le_bytes()) as f64).unwrap(),
+                        "f64_be" => Number::from_f64(f64::from_be_bytes((value as u64).to_be_bytes()) as f64).unwrap(),
+                        "i16" | "i16_le" => Number::from(i16::from_le_bytes((value as u16).to_le_bytes())),
+                        "i16_be" => Number::from(i16::from_be_bytes((value as u16).to_be_bytes())),
+                        t if t.starts_with('u') => Number::from(value),
+                        _ => { panic!("unsupported field_type: {}", field_type) },
+                    };
+                    final_value_cand
                 };
                 println!("final_value: {:?}", final_value);
                 bit_offset = process_field(data, field, dry_run, final_value, bit_offset, prev_val_cache, &mut parsed_data)?;
@@ -354,6 +366,41 @@ fn test_match_to_nested_packet() {
     let (parsed_json, _) = parse_schema(&data, &schema.branches, false, &mut previous_values).unwrap();
 
     assert_eq!(parsed_json, json!({
+        "type": {
+            "name": "Type1",
+            "field1": 2,
+            "field2": 1000
+        }
+    }));
+}
+
+#[test]
+fn test_match_non_immediate_field_to_nested_packet() {
+    let schema_json = json!({
+        "branches": [
+            { "name": "type", "type": "u8"},
+            { "name": "reserved", "type": "u8"},
+            //u0 infers 'dont read' and requires name declared earlier
+            { "name": "type", "type": "u0", "match": {
+                "0": "Type0",
+                "1": {
+                    "name": "Type1",
+                    "branches": [
+                        { "name": "field1", "type": "u8" },
+                        { "name": "field2", "type": "u16_le" }
+                    ]
+                }
+            }}
+        ]
+    });
+    let data = hex_to_bin("01 ff 02 E8 03");
+
+    let schema = schema_to_tree(schema_json);
+    let mut previous_values = HashMap::new();
+    let (parsed_json, _) = parse_schema(&data, &schema.branches, false, &mut previous_values).unwrap();
+
+    assert_eq!(parsed_json, json!({
+        "reserved": 255,
         "type": {
             "name": "Type1",
             "field1": 2,

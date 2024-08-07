@@ -212,12 +212,23 @@ pub fn parse_schema(
                 }
             }
             if let Some(loop_count) = loop_count_option {  //loop around files
-                println!("loop_count: {}", loop_count);
+
                 let mut output_array:Vec<Value> = vec![];
-                for _ in 0..loop_count {
-                    let (nested_data, nested_bits) = parse_schema(&data[(bit_offset / 8)..], field.branches.as_ref().unwrap(), dry_run, prev_val_cache)?;
-                    bit_offset += nested_bits;
-                    output_array.push(nested_data);
+                for li in 0..loop_count {
+                    println!("loop {li} / loop_count: {loop_count} start");
+                    let loop_ret = parse_schema(&data[(bit_offset / 8)..], field.branches.as_ref().unwrap(), dry_run, prev_val_cache);
+                    match loop_ret {
+                        Ok((nested_data, nested_bits)) => {
+                            println!("loop {li} / loop_count: {loop_count} got nested_data {} nested_bits {}", nested_data, nested_bits);
+                            bit_offset += nested_bits;
+                            output_array.push(nested_data);
+                        }
+                        Err((loop_partially_parsed_data, errstr)) => {
+                            println!("loop {li} / loop_count: {loop_count} got error {errstr} - so breaking now and discard _loop_parsed_data {loop_partially_parsed_data}");
+                            break;
+                        }
+                    }
+
                 }
                 parsed_data.insert(field.name.clone(), Value::Array(output_array));
             } else {
@@ -225,7 +236,10 @@ pub fn parse_schema(
                     prev_field_refer_val.unwrap()
                 } else {
                     let field_type = &field.field_type.clone().unwrap();
-                    let (value, new_bit_offset) = if !dry_run { read_bits(data, bit_offset, field_bits).map_err(|err| (Value::Object(parsed_data.clone()), err))? } else { (0, bit_offset as usize + field_bits as usize) };
+
+                    let (value, new_bit_offset) = if !dry_run { read_bits(data, bit_offset, field_bits)
+                        //return parsed_data so far when error too - don't throw it away
+                        .map_err(|err| (Value::Object(parsed_data.clone()), err))? } else { (0, bit_offset as usize + field_bits as usize) };
                     bit_offset = new_bit_offset;
                     let final_value_cand: Number = match field_type.as_str() {
                         "u8" | "u8_le" => Number::from(value as u8 as u32),
@@ -360,6 +374,34 @@ fn test_loop_static_count() {
     let mut previous_values = HashMap::new();
     let (parsed_json, _) = parse_schema(&data, &schema.branches, false, &mut previous_values).unwrap();
 
+    assert_eq!(parsed_json, json!({
+        "reserved": 254,
+        "items": [
+            { "item": 1 },
+            { "item": 2 },
+            { "item": 3 }
+        ]
+    }));
+}
+
+#[test]
+fn test_loop_until_no_more_data() {
+    let schema_json = json!({
+        "branches": [
+            { "name": "reserved", "type": "u8" },
+            { "name": "items", "loop_count": 999, "branches": [
+                { "name": "item", "type": "u8" }
+            ]}
+        ]
+    });
+
+    let data = hex_to_bin("FE 01 02 03");
+
+    let schema = schema_to_tree(schema_json);
+    let mut previous_values = HashMap::new();
+    let (parsed_json, bit_offset) = parse_schema(&data, &schema.branches, false, &mut previous_values).unwrap();
+    println!("bit_offset: {bit_offset}");
+    assert_eq!(bit_offset, data.len()*8);
     assert_eq!(parsed_json, json!({
         "reserved": 254,
         "items": [

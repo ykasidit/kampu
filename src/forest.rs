@@ -44,7 +44,7 @@ pub fn parse_tree(
             Ok(parsed_json)
         }
         Err((partially_parsed_json, errstr)) => {
-            println!("WARNING: parse_schema() failed with error: {errstr}, returning partially_parsed_json struct");
+            println!("WARNING: (normal for infinite loops or loops beyond bytes provided) parse_schema() failed with error: {errstr}, returning partially_parsed_json struct");
             Ok(partially_parsed_json)
         }
     }

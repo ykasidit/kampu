@@ -1,6 +1,6 @@
 [package]
 name = "kampu"
-version = "0.1.9"
+version = "0.1.10"
 edition = '2021'
 license = "Apache-2.0"
 description = "Generic byte array parser function where you can define the structure/tree of the bytes in JSON, send it a byte array and get the parsed output in JSON."

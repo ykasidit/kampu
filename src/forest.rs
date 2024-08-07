@@ -1,10 +1,9 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex};
 use once_cell::sync::Lazy;
 use serde_json::Value;
-use crate::tree::{parse_schema, Tree, schema_to_tree};
-use serde_json::json;
-use crate::utils::hex_to_bin;
+
+use crate::tree::{parse_schema, schema_to_tree, Tree};
 
 static PLANTED_TREES:Lazy<Mutex<HashMap<u64, Tree>>> = Lazy::new(|| {
     let hm:HashMap<u64, Tree> = HashMap::new();
@@ -24,26 +23,40 @@ pub fn plant_tree(unique_tree_id:u64, schema: Value) -> i32 {
 pub fn parse_tree(
     unique_tree_id: u64,
     data: &[u8]
-) -> Value
+) -> Result<Value, String>
 {
-    let schema = {
+    let schema:Tree = {
         //use this block to quickly get, clone and release the lock on the mutex-locked map
         let reg_map = PLANTED_TREES.lock().unwrap();
-        let sr = reg_map.get(&unique_tree_id).unwrap();
+        let sr = reg_map.get(&unique_tree_id).ok_or(format!("No tree with unique_tree_id {} found", unique_tree_id))?;
         let so = sr.clone();
         so
     };
+
     let mut previous_values = HashMap::new();
-    let (parsed_json, _) = parse_schema(&data, &schema.branches, false, &mut previous_values).unwrap();
-    parsed_json
+    let parse_ret = parse_schema(&data, &schema.branches, false, &mut previous_values);
+    match parse_ret {
+        Ok((parsed_json, _parse_pos)) => {
+            Ok(parsed_json)
+        }
+        Err((partially_parsed_json, errstr)) => {
+            println!("WARNING: parse_schema() failed with error: {errstr}, returning partially_parsed_json struct");
+            Ok(partially_parsed_json)
+        }
+    }
 }
+
+#[cfg(test)]
+use serde_json::json;
+#[cfg(test)]
+use crate::utils::hex_to_bin;
 
 #[test]
 fn test_simple_packet() {
-    const tree_id:u64 = 1;
+    const TREE_ID:u64 = 1;
     let data = hex_to_bin("01 00 E8 03");
     plant_tree(
-        tree_id,
+        TREE_ID,
         json!({
                 "branches": [
                     { "name": "fix_status", "type": "u8" },
@@ -52,7 +65,7 @@ fn test_simple_packet() {
                 ]
             })
     );
-    let parsed_json = parse_tree(tree_id, &data);
+    let parsed_json = parse_tree(TREE_ID, &data).unwrap();
     assert_eq!(parsed_json, json!({
             "fix_status": 1,
             "rcr": 0,

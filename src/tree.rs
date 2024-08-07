@@ -1,10 +1,16 @@
-use std::any::Any;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use bitter::{BitReader, LittleEndianReader};
-use evalexpr::{ContextWithMutableVariables, eval_int_with_context, eval_with_context_mut, HashMapContext};
+use evalexpr::{ContextWithMutableVariables, eval_with_context_mut, HashMapContext};
+#[cfg(test)]
+use evalexpr::eval_int_with_context;
 use serde::Deserialize;
 use serde_json::{Map, Number, Value};
+#[cfg(test)]
+use serde_json::json;
+
+#[cfg(test)]
+use crate::utils::hex_to_bin;
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct Branch {
@@ -62,75 +68,6 @@ fn evaluate_expression(value: Number, expression: &str) -> bool {
     false
 }
 
-fn verify_schema(branches: &[Branch], known_fields: &mut HashSet<String>) -> bool {
-    for branch in branches {
-        // Ensure the field has a name
-        if branch.name.is_empty() {
-            println!("Error: A field is missing a name.");
-            return false;
-        }
-
-        // Add the field name to the known fields set
-        known_fields.insert(branch.name.clone());
-
-        // Check for valid entries
-        if let Some(field_type) = &branch.field_type {
-            match branch.loop_count.clone() {
-                Some(loop_count) => {
-                    match loop_count {
-                        Value::Number(_) => {
-
-                        }
-                        Value::String(_) => {
-                            let loop_field_name = &field_type[13..];
-                            if !known_fields.contains(loop_field_name) {
-                                println!("Error: Unknown field '{}' referenced in '{}'.", loop_field_name, branch.name);
-                                return false;
-                            }
-                        }
-                        _ => {
-                            panic!("unsupported loop_count value: {loop_count} - it must either be a number or a string name of a previous field");
-                        }
-                    }
-                }
-                None => {
-                    let valid_types = vec ! [
-                        "u8", "u8_le", "u8_be", "u16", "u16_le", "u16_be", "u32", "u32_le", "u32_be",
-                        "u64", "u64_le", "u64_be", "f32", "f32_le", "f32_be", "f64", "f64_le", "f64_be",
-                        "i16", "i16_le", "i16_be",
-                    ];
-                    if ! valid_types.contains( & field_type.as_str()) {
-                        println ! ("Error: Invalid type '{}' in field '{}'.", field_type, branch.name);
-                        return false;
-                    }
-                }
-            }
-        }
-
-        let field_keys: Vec<String> = branch
-            .match_cases
-            .as_ref()
-            .map(|mc| mc.keys().cloned().collect())
-            .unwrap_or_else(Vec::new);
-
-        let all_keys = vec!["type", "branches"];
-
-        for key in field_keys {
-            if !all_keys.contains(&key.as_str()) && !key.starts_with("gt_") && !key.starts_with("ge_") && !key.starts_with("lt_") && !key.starts_with("le_") {
-                println!("Error: Invalid key '{}' in match case of field '{}'.", key, branch.name);
-                return false;
-            }
-        }
-
-        // Verify nested fields recursively
-        if let Some(fields) = &branch.branches {
-            if !verify_schema(fields, known_fields) {
-                return false;
-            }
-        }
-    }
-    true
-}
 
 pub fn get_field_size(field: &Branch, val_cache: &mut HashMap<String, Value>) -> (u32, Option<u64>)
 {
@@ -188,7 +125,7 @@ pub fn process_field(data: &[u8], field: &Branch, dry_run: bool, value: Number, 
                         let (mut nested_data, nested_bits) = parse_schema(&data[(bit_offset / 8)..], &nested_fields, dry_run, prev_val_cache)?;
                         new_bit_offset += nested_bits;
                         if nested_data.is_object() && obj.contains_key("name") {
-                            let mut no = nested_data.as_object_mut().unwrap();
+                            let no = nested_data.as_object_mut().unwrap();
                             no.insert(
                                 "name".to_string(),
                                 obj.get("name").unwrap().clone()
@@ -213,11 +150,11 @@ pub fn process_field(data: &[u8], field: &Branch, dry_run: bool, value: Number, 
         //make eval context
         let mut eval_context = HashMapContext::new();
         if value.is_f64() {
-            eval_context.set_value("value_float".to_string(), value.as_f64().unwrap().into());
+            eval_context.set_value("value_float".to_string(), value.as_f64().unwrap().into()).unwrap();
         } else if value.is_i64() {
-            eval_context.set_value("value_int".to_string(), value.as_i64().unwrap().into());
+            eval_context.set_value("value_int".to_string(), value.as_i64().unwrap().into()).unwrap();
         }
-        eval_context.set_value("value_string".to_string(), value.to_string().into());
+        eval_context.set_value("value_string".to_string(), value.to_string().into()).unwrap();
 
         match &field.eval {
             Some(evals) => {
@@ -225,7 +162,7 @@ pub fn process_field(data: &[u8], field: &Branch, dry_run: bool, value: Number, 
                 match eval_ret {
                     Ok(ret) => {
                         println!("eval ret: {:?}", ret);
-                        let mut ret_serde_value = if ret.is_float() {
+                        let ret_serde_value = if ret.is_float() {
                             Value::from(ret.as_float().unwrap())
                         } else if ret.is_int() {
                             Value::from(ret.as_int().unwrap())
@@ -317,499 +254,233 @@ pub fn schema_to_tree(schema_json: Value) -> Tree {
     serde_json::from_value(schema_json).expect("Unable to parse JSON schema")
 }
 
-#[cfg(test)]
-mod tests {
-    use evalexpr::{ContextWithMutableVariables, eval_int_with_context, HashMapContext};
-    use once_cell::sync::Lazy;
-    use serde_json::json;
-    use crate::utils::hex_to_bin;
-    use super::*;
-
-    #[test]
-    fn test_nested_packet() {
-        let schema_json = json!({
-            "branches": [
-                { "name": "header", "type": "u8" },
-                { "name": "payload", "branches": [
-                    { "name": "field1", "type": "u8" },
-                    { "name": "field2", "type": "u16_le" }
-                ]}
-            ]
-        });
-
-        let data = hex_to_bin("01 02 E8 03");
-
-        let schema = schema_to_tree(schema_json);
-        let mut previous_values = HashMap::new();
-        let (parsed_json, _) = parse_schema(&data, &schema.branches, false, &mut previous_values).unwrap();
-
-        assert_eq!(parsed_json, json!({
-            "header": 1,
-            "payload": {
-                "field1": 2,
-                "field2": 1000
-            }
-        }));
-    }
-
-    #[test]
-    fn test_match_num_to_string() {
-        let schema_json = json!({
-            "branches": [
-                { "name": "status", "type": "u8", "match": {
-                    "0": "Inactive",
-                    "1": "Active"
-                }}
-            ]
-        });
-
-        let data = hex_to_bin("01");
-
-        let schema = schema_to_tree(schema_json);
-        let mut previous_values = HashMap::new();
-        let (parsed_json, _) = parse_schema(&data, &schema.branches, false, &mut previous_values).unwrap();
-        assert_eq!(parsed_json, json!({
-            "status": "Active"
-        }));
-    }
-
-    #[test]
-    fn test_loop_fields() {
-        let schema_json = json!({
-            "branches": [
-                { "name": "count", "type": "u8" },
-                { "name": "reserved", "type": "u8" },
-                { "name": "items", "loop_count":"count", "branches": [
-                    { "name": "item", "type": "u8" }
-                ]}
-            ]
-        });
-
-        let data = hex_to_bin("03 FF 01 02 03");
-
-        let schema = schema_to_tree(schema_json);
-        let mut previous_values = HashMap::new();
-        let (parsed_json, _) = parse_schema(&data, &schema.branches, false, &mut previous_values).unwrap();
-
-        assert_eq!(parsed_json, json!({
-            "count": 3,
-            "reserved": 255,
-            "items": [
-                { "item": 1 },
-                { "item": 2 },
-                { "item": 3 }
-            ]
-        }));
-    }
-
-    #[test]
-    fn test_match_to_nested_packet() {
-        let schema_json = json!({
-            "branches": [
-                { "name": "type", "type": "u8", "match": {
-                    "0": "Type0",
-                    "1": {
-                        "name": "Type1",
-                        "branches": [
-                            { "name": "field1", "type": "u8" },
-                            { "name": "field2", "type": "u16_le" }
-                        ]
-                    }
-                }}
-            ]
-        });
-        let data = hex_to_bin("01 02 E8 03");
-
-        let schema = schema_to_tree(schema_json);
-        let mut previous_values = HashMap::new();
-        let (parsed_json, _) = parse_schema(&data, &schema.branches, false, &mut previous_values).unwrap();
-
-        assert_eq!(parsed_json, json!({
-            "type": {
-                "name": "Type1",
-                "field1": 2,
-                "field2": 1000
-            }
-        }));
-    }
-
-    #[test]
-    fn test_dry_run() {
-        let schema_json = json!({
-            "branches": [
-                { "name": "fix_status", "type": "u8" },
-                { "name": "rcr", "type": "u8" },
-                { "name": "millisecond", "type": "u16_le" }
-            ]
-        });
-
-        let schema = schema_to_tree(schema_json);
-        let mut previous_values = HashMap::new();
-        let (parsed_json, _) = parse_schema(&[], &schema.branches, true, &mut previous_values).unwrap();
-        assert_eq!(parsed_json, json!({
-            "fix_status": 0,
-            "millisecond": 0,
-            "rcr": 0
-        }));
-    }
-
-    #[test]
-    fn test_coral_reef() {
-        let coral_reef_structure_json = json!({
-            "branches": [
-                { "name": "nature_reserve_id", "type": "u16" },
-                { "name": "n_colonies", "type": "u32" },
-                { "name": "region_id", "type": "u16" },
-                {
-                "name": "colonies", "loop_count": "n_colonies", "branches": [
-                    { "name": "n_polyps", "type": "u32" },
-                    { "name": "polyps", "loop_count": "n_polyps", "branches": [
-                        { "name": "polyp_id", "type": "u32" },
-                        { "name": "polyp_type", "type": "u8" }
-                    ]
-                    }
-                ]
-                }
-            ]
-        });
-
-        let data = hex_to_bin(r#"
-        fe ff
-        01 00 00 00
-        04 00
-        02 00 00 00
-        00 00 00 00
-        01
-        01 00 00 00
-        01
-        "#);
-
-        let schema = schema_to_tree(coral_reef_structure_json);
-        let mut previous_values = HashMap::new();
-        let (parsed_json, _) = parse_schema(&data, &schema.branches, false, &mut previous_values).unwrap();
-
-        assert_eq!(parsed_json, json!({
-            "n_colonies": 1,
-            "nature_reserve_id": 65534,
-            "region_id": 4,
-            "colonies": [
-                {
-                    "n_polyps": 2,
-                    "polyps": [
-                    { "polyp_id": 0, "polyp_type": 1},
-                    { "polyp_id": 1, "polyp_type": 1}
-                ]
-                }
-            ]
-        }));
-    }
-
-    ////////////////// qstarz_ble tests
-    /*
-    ref formula:
-    int tmp_lat = dLat / 100;
-    int tmp_lon = dLon / 100;
-    dLat = tmp_lat + (dLat - tmp_lat * 100) / 60.0;
-    dLon = tmp_lon + (dLon - tmp_lon * 100) / 60.0;
-    */
-    const qstarz_lat_lon_DDDMM_MMMM_formula:&str = r#"
-    tmp_lat = value_float / 100;
-    tmp_lat + (value_float - tmp_lat * 100) / 60.0
-    "#;
-    const qstarz_ble_schema: Lazy<Tree> = Lazy::new(|| {
-        schema_to_tree(
-            json!({
-                "branches": [
-                    { "name": "fix_status", "type": "u8",
-                        "match": {
-                        "1": "Fix not available",
-                        "2": "2D",
-                        "3": "3D",
-                    }
-                    },
-                    { "name": "rcr", "type": "u8" },
-                    { "name": "millisecond", "type": "u16" },
-                    { "name": "latitude", "type": "f64", "eval": qstarz_lat_lon_DDDMM_MMMM_formula },
-                    { "name": "longitude", "type": "f64", "eval": qstarz_lat_lon_DDDMM_MMMM_formula },
-                    { "name": "timestamp_s", "type": "u32" },
-                    { "name": "float_speed_kmh", "type": "f32" },
-                    { "name": "float_height_m", "type": "f32" },
-                    { "name": "heading_degrees", "type": "f32" },
-                    { "name": "g_sensor_x", "type": "i16" },
-                    { "name": "g_sensor_y", "type": "i16" },
-                    { "name": "g_sensor_z", "type": "i16" },
-                    { "name": "max_snr", "type": "u16" },
-                    { "name": "hdop", "type": "f32" },
-                    { "name": "vdop", "type": "f32" },
-                    { "name": "satellite_count_view", "type": "u8" },
-                    { "name": "satellite_count_used", "type": "u8" },
-                    { "name": "fix_quality", "type": "u8",
-                        "match": {
-                        "0": "invalid",
-                        "1":  "GPS fix (SPS)",
-                        "2": "DGPS fix",
-                        "3": "PPS fix",
-                        "4": "Real Time Kinematic",
-                        "5": "Float RTK",
-                        "6": "estimated (dead reckoning) (2.3 feature)",
-                        "7": "Manual input mode",
-                        "8": "Simulation mode"
-                    }
-                    },
-                    { "name": "battery_percent", "type": "u8" },
-                    { "name": "dummy", "type": "u16" },
-                    { "name": "series_number", "type": "u8" },
-                    {
-                        "name": "gsv_fields",
-                        "loop_count": 3,
-                        "branches": [
-                        { "name": "prn", "type": "u8" },
-                        { "name": "elevation", "type": "u16" },
-                        { "name": "azimuth", "type": "u16" },
-                        { "name": "snr", "type": "u8" }
-                        ]
-                    }
-            ]
-            })
-        )
+#[test]
+fn test_nested_packet() {
+    let schema_json = json!({
+        "branches": [
+            { "name": "header", "type": "u8" },
+            { "name": "payload", "branches": [
+                { "name": "field1", "type": "u8" },
+                { "name": "field2", "type": "u16_le" }
+            ]}
+        ]
     });
 
+    let data = hex_to_bin("01 02 E8 03");
 
+    let schema = schema_to_tree(schema_json);
+    let mut previous_values = HashMap::new();
+    let (parsed_json, _) = parse_schema(&data, &schema.branches, false, &mut previous_values).unwrap();
 
+    assert_eq!(parsed_json, json!({
+        "header": 1,
+        "payload": {
+            "field1": 2,
+            "field2": 1000
+        }
+    }));
+}
 
-    #[test]
-    fn test_qstarz_ble_packet_gps_not_fixed()
-    {
-        /*
-        19:03:33.506 - Characteristic (6E400004-B5A3-F393-E0A9-E50E24DCCA9E) notified: <01547801 00000000 00000080 00000000 00000080> 	01=GPS is not fixed
-        19:03:33.506 - Characteristic (6E400004-B5A3-F393-E0A9-E50E24DCCA9E) notified: <85f2de60 61a6fd3f 00000000 14aeca42 6800a9ff>
-        19:03:33.507 - Characteristic (6E400004-B5A3-F393-E0A9-E50E24DCCA9E) notified: <46001400 00000000 00000000 0d00003c 00000000>
-        19:03:33.507 - Characteristic (6E400004-B5A3-F393-E0A9-E50E24DCCA9E) notified: <05460300 3b000041 0c001300 00551100 b00000> 	05=GSV #5
-        */
-        let data = hex_to_bin(r#"
-        01547801 00000000 00000080 00000000 00000080
-        85f2de60 61a6fd3f 00000000 14aeca42 6800a9ff
-        46001400 00000000 00000000 0d00003c 00000000
-        05460300 3b000041 0c001300 00551100 b00000
-        "#
-        );
-        let mut val_cache = HashMap::new();
-        let (parsed_json, _) = parse_schema(&data, &qstarz_ble_schema.branches, false, &mut val_cache).unwrap();
-        println!("parsed_json: {}", serde_json::to_string_pretty(&parsed_json).unwrap());
-        assert_eq!(
-            parsed_json,
-            json!( {
-                "fix_status": "Fix not available",
-                "rcr": 84,
-                "millisecond": 376,
-                "latitude": -0.0,
-                "longitude": -0.0,
-                "timestamp_s": 1625223813,
-                "float_speed_kmh": 1.9816399812698364,
-                "float_height_m": 0.0,
-                "heading_degrees": 101.33999633789062,
-                "g_sensor_x": 104,
-                "g_sensor_y": -87,
-                "g_sensor_z": 70,
-                "max_snr": 20,
-                "hdop": 0.0,
-                "vdop": 0.0,
-                "satellite_count_view": 13,
-                "satellite_count_used": 0,
-                "fix_quality": "invalid",
-                "battery_percent": 60,
-                "dummy": 0,
-                "series_number": 0,
-                "gsv_fields": [
-                    {
-                        "prn": 0,
-                        "elevation": 17925,
-                        "azimuth": 3,
-                        "snr": 59
-                    },
-                    {
-                        "prn": 0,
-                        "elevation": 16640,
-                        "azimuth": 12,
-                        "snr": 19
-                    },
-                    {
-                        "prn": 0,
-                        "elevation": 21760,
-                        "azimuth": 17,
-                        "snr": 176
-                    }
+#[test]
+fn test_match_num_to_string() {
+    let schema_json = json!({
+        "branches": [
+            { "name": "status", "type": "u8", "match": {
+                "0": "Inactive",
+                "1": "Active"
+            }}
+        ]
+    });
+
+    let data = hex_to_bin("01");
+
+    let schema = schema_to_tree(schema_json);
+    let mut previous_values = HashMap::new();
+    let (parsed_json, _) = parse_schema(&data, &schema.branches, false, &mut previous_values).unwrap();
+    assert_eq!(parsed_json, json!({
+        "status": "Active"
+    }));
+}
+
+#[test]
+fn test_loop_fields() {
+    let schema_json = json!({
+        "branches": [
+            { "name": "count", "type": "u8" },
+            { "name": "reserved", "type": "u8" },
+            { "name": "items", "loop_count":"count", "branches": [
+                { "name": "item", "type": "u8" }
+            ]}
+        ]
+    });
+
+    let data = hex_to_bin("03 FF 01 02 03");
+
+    let schema = schema_to_tree(schema_json);
+    let mut previous_values = HashMap::new();
+    let (parsed_json, _) = parse_schema(&data, &schema.branches, false, &mut previous_values).unwrap();
+
+    assert_eq!(parsed_json, json!({
+        "count": 3,
+        "reserved": 255,
+        "items": [
+            { "item": 1 },
+            { "item": 2 },
+            { "item": 3 }
+        ]
+    }));
+}
+
+#[test]
+fn test_match_to_nested_packet() {
+    let schema_json = json!({
+        "branches": [
+            { "name": "type", "type": "u8", "match": {
+                "0": "Type0",
+                "1": {
+                    "name": "Type1",
+                    "branches": [
+                        { "name": "field1", "type": "u8" },
+                        { "name": "field2", "type": "u16_le" }
+                    ]
+                }
+            }}
+        ]
+    });
+    let data = hex_to_bin("01 02 E8 03");
+
+    let schema = schema_to_tree(schema_json);
+    let mut previous_values = HashMap::new();
+    let (parsed_json, _) = parse_schema(&data, &schema.branches, false, &mut previous_values).unwrap();
+
+    assert_eq!(parsed_json, json!({
+        "type": {
+            "name": "Type1",
+            "field1": 2,
+            "field2": 1000
+        }
+    }));
+}
+
+#[test]
+fn test_dry_run() {
+    let schema_json = json!({
+        "branches": [
+            { "name": "fix_status", "type": "u8" },
+            { "name": "rcr", "type": "u8" },
+            { "name": "millisecond", "type": "u16_le" }
+        ]
+    });
+
+    let schema = schema_to_tree(schema_json);
+    let mut previous_values = HashMap::new();
+    let (parsed_json, _) = parse_schema(&[], &schema.branches, true, &mut previous_values).unwrap();
+    assert_eq!(parsed_json, json!({
+        "fix_status": 0,
+        "millisecond": 0,
+        "rcr": 0
+    }));
+}
+
+#[test]
+fn test_coral_reef() {
+    let coral_reef_structure_json = json!({
+        "branches": [
+            { "name": "nature_reserve_id", "type": "u16" },
+            { "name": "n_colonies", "type": "u32" },
+            { "name": "region_id", "type": "u16" },
+            {
+            "name": "colonies", "loop_count": "n_colonies", "branches": [
+                { "name": "n_polyps", "type": "u32" },
+                { "name": "polyps", "loop_count": "n_polyps", "branches": [
+                    { "name": "polyp_id", "type": "u32" },
+                    { "name": "polyp_type", "type": "u8" }
                 ]
+                }
+            ]
             }
-            )
-        );
-    }
+        ]
+    });
 
-    #[test]
-    fn test_qstarz_ble_packet_gps_fixed_wo_gsv()
-    {
-        /*
-        19:03:34.403 - Characteristic (6E400004-B5A3-F393-E0A9-E50E24DCCA9E) notified: <0354c800 cd94d6df 8a91a340 821e6adb 2eadc740>  	03=GPS is fixed
-        19:03:34.403 - Characteristic (6E400004-B5A3-F393-E0A9-E50E24DCCA9E) notified: <86f2de60 3a924340 10c89943 ec51c842 610077ff>
-        19:03:34.404 - Characteristic (6E400004-B5A3-F393-E0A9-E50E24DCCA9E) notified: <72001300 b81ee53f ec51783f 0d05013c 0000>
-        */
-        let data = hex_to_bin(r#"
-        0354c800 cd94d6df 8a91a340 821e6adb 2eadc740
-        86f2de60 3a924340 10c89943 ec51c842 610077ff
-        72001300 b81ee53f ec51783f 0d05013c 0000
-        "#
-        );
-        let mut val_cache = HashMap::new();
-        let (parsed_json, _) = parse_schema(&data, &qstarz_ble_schema.branches, false, &mut val_cache).err().unwrap();
-        println!("parsed_json: {}", serde_json::to_string_pretty(&parsed_json).unwrap());
-        assert_eq!(
-            parsed_json,
-            json!({
-                "battery_percent": 60,
-                "dummy": 0,
-                "fix_quality": "GPS fix (SPS)",
-                "fix_status": "3D",
-                "float_height_m": 307.56298828125,
-                "float_speed_kmh": 3.055799961090088,
-                "g_sensor_x": 97,
-                "g_sensor_y": -137,
-                "g_sensor_z": 114,
-                "hdop": 1.7899999618530273,
-                "heading_degrees": 100.16000366210938,
-                "latitude": 25.04771239,
-                "longitude": 121.22366071,
-                "max_snr": 19,
-                "millisecond": 200,
-                "rcr": 84,
-                "satellite_count_used": 5,
-                "satellite_count_view": 13,
-                "timestamp_s": 1625223814,
-                "vdop": 0.9700000286102295
-            })
-        );
+    let data = hex_to_bin(r#"
+    fe ff
+    01 00 00 00
+    04 00
+    02 00 00 00
+    00 00 00 00
+    01
+    01 00 00 00
+    01
+    "#);
 
-        //////////////////////////
+    let schema = schema_to_tree(coral_reef_structure_json);
+    let mut previous_values = HashMap::new();
+    let (parsed_json, _) = parse_schema(&data, &schema.branches, false, &mut previous_values).unwrap();
 
-    }
-
-    #[test]
-    fn test_eval_expr()
-    {
-        let mut eval_context = HashMapContext::new();
-        eval_context.set_value("a".to_string(), 1.into());
-        assert_eq!(eval_int_with_context("a + 1 + 2 + 3", &eval_context), Ok(7));
-
-        //cases for  eval int/float/str
-        let schema_json = json!({
-            "branches": [
-                { "name": "sth", "type": "u8", "eval": "value_int + 1"},
+    assert_eq!(parsed_json, json!({
+        "n_colonies": 1,
+        "nature_reserve_id": 65534,
+        "region_id": 4,
+        "colonies": [
+            {
+                "n_polyps": 2,
+                "polyps": [
+                { "polyp_id": 0, "polyp_type": 1},
+                { "polyp_id": 1, "polyp_type": 1}
             ]
-        });
-        let data = hex_to_bin("01");
-        let schema = schema_to_tree(schema_json);
-        let mut previous_values = HashMap::new();
-        let (parsed_json, bit_offset) = parse_schema(&data, &schema.branches, false, &mut previous_values).unwrap();
-        assert_eq!(bit_offset, 8);
-        assert_eq!(parsed_json, json!({
-            "sth": 2,
-        }));
-
-        let schema_json = json!({
-            "branches": [
-                { "name": "sth", "type": "u8", "eval": "value_int + 1.0"},
-            ]
-        });
-        let data = hex_to_bin("01");
-        let schema = schema_to_tree(schema_json);
-        let mut previous_values = HashMap::new();
-        let (parsed_json, bit_offset) = parse_schema(&data, &schema.branches, false, &mut previous_values).unwrap();
-        assert_eq!(bit_offset, 8);
-        assert_eq!(parsed_json, json!({
-            "sth": 2.0,
-        }));
-
-        let schema_json = json!({
-            "branches": [
-                { "name": "sth", "type": "u8", "eval": "math::pow(value_int, 2)"},
-            ]
-        });
-        let data = hex_to_bin("0A");
-        let schema = schema_to_tree(schema_json);
-        let mut previous_values = HashMap::new();
-        let (parsed_json, bit_offset) = parse_schema(&data, &schema.branches, false, &mut previous_values).unwrap();
-        assert_eq!(bit_offset, 8);
-        assert_eq!(parsed_json, json!({
-            "sth": 100.0,
-        }));
-    }
-
-    #[test]
-    fn test_qstarz_ble_packet_gps_fixed_w_gsv()
-    {
-        /*
-        19:03:34.555 - Characteristic (6E400004-B5A3-F393-E0A9-E50E24DCCA9E) notified: <03549001 faf202ec 8b91a340 69519fe4 2eadc740>  	03=GPS is fixed
-        19:03:34.555 - Characteristic (6E400004-B5A3-F393-E0A9-E50E24DCCA9E) notified: <86f2de60 40de4b40 aec79943 5c8fd442 480082ff>
-        19:03:34.555 - Characteristic (6E400004-B5A3-F393-E0A9-E50E24DCCA9E) notified: <52001100 b81ee53f ec51783f 0d05013c 00000000>
-        19:03:34.555 - Characteristic (6E400004-B5A3-F393-E0A9-E50E24DCCA9E) notified: <05460300 3b000041 0c001300 00551100 b00000> 	05=GSV #5
-        */
-        let data = hex_to_bin(r#"
-        03549001 faf202ec 8b91a340 69519fe4 2eadc740
-        86f2de60 40de4b40 aec79943 5c8fd442 480082ff
-        52001100 b81ee53f ec51783f 0d05013c 00000000
-        05460300 3b000041 0c001300 00551100 b00000
-        "#
-        );
-        let mut val_cache = HashMap::new();
-        let (parsed_json, _) = parse_schema(&data, &qstarz_ble_schema.branches, false, &mut val_cache).unwrap();
-        println!("parsed_json: {}", serde_json::to_string_pretty(&parsed_json).unwrap());
-        assert_eq!(
-            parsed_json,
-            json!({
-                "fix_status": "3D",
-                "rcr": 84,
-                "millisecond": 400,
-                "latitude": 25.047732850000003,
-                "longitude": 121.22366351999999,
-                "timestamp_s": 1625223814,
-                "float_speed_kmh": 3.1854400634765625,
-                "float_height_m": 307.55999755859375,
-                "heading_degrees": 106.27999877929688,
-                "g_sensor_x": 72,
-                "g_sensor_y": -126,
-                "g_sensor_z": 82,
-                "max_snr": 17,
-                "hdop": 1.7899999618530273,
-                "vdop": 0.9700000286102295,
-                "satellite_count_view": 13,
-                "satellite_count_used": 5,
-                "fix_quality": "GPS fix (SPS)",
-                "battery_percent": 60,
-                "dummy": 0,
-                "series_number": 0,
-                "gsv_fields": [
-                    {
-                        "prn": 0,
-                        "elevation": 17925,
-                        "azimuth": 3,
-                        "snr": 59
-                    },
-                    {
-                        "prn": 0,
-                        "elevation": 16640,
-                        "azimuth": 12,
-                        "snr": 19
-                    },
-                    {
-                        "prn": 0,
-                        "elevation": 21760,
-                        "azimuth": 17,
-                        "snr": 176
-                    }
-                ]
             }
-            )
-        );
-        //////////////////////////
+        ]
+    }));
+}
 
-    }
+
+#[test]
+fn test_eval_expr()
+{
+    let mut eval_context = HashMapContext::new();
+    eval_context.set_value("a".to_string(), 1.into()).unwrap();
+    assert_eq!(eval_int_with_context("a + 1 + 2 + 3", &eval_context), Ok(7));
+
+    //cases for  eval int/float/str
+    let schema_json = json!({
+        "branches": [
+            { "name": "sth", "type": "u8", "eval": "value_int + 1"},
+        ]
+    });
+    let data = hex_to_bin("01");
+    let schema = schema_to_tree(schema_json);
+    let mut previous_values = HashMap::new();
+    let (parsed_json, bit_offset) = parse_schema(&data, &schema.branches, false, &mut previous_values).unwrap();
+    assert_eq!(bit_offset, 8);
+    assert_eq!(parsed_json, json!({
+        "sth": 2,
+    }));
+
+    let schema_json = json!({
+        "branches": [
+            { "name": "sth", "type": "u8", "eval": "value_int + 1.0"},
+        ]
+    });
+    let data = hex_to_bin("01");
+    let schema = schema_to_tree(schema_json);
+    let mut previous_values = HashMap::new();
+    let (parsed_json, bit_offset) = parse_schema(&data, &schema.branches, false, &mut previous_values).unwrap();
+    assert_eq!(bit_offset, 8);
+    assert_eq!(parsed_json, json!({
+        "sth": 2.0,
+    }));
+
+    let schema_json = json!({
+        "branches": [
+            { "name": "sth", "type": "u8", "eval": "math::pow(value_int, 2)"},
+        ]
+    });
+    let data = hex_to_bin("0A");
+    let schema = schema_to_tree(schema_json);
+    let mut previous_values = HashMap::new();
+    let (parsed_json, bit_offset) = parse_schema(&data, &schema.branches, false, &mut previous_values).unwrap();
+    assert_eq!(bit_offset, 8);
+    assert_eq!(parsed_json, json!({
+        "sth": 100.0,
+    }));
 }

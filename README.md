@@ -8,7 +8,7 @@ Generic byte array parser function where you can define the structure/tree of th
 Usage
 -----
 
-See tests towards the bottom of the `tree.rs` file, example:
+See the `tests` folder for examples, a simple example below:
 <pre>
 fn test_simple_packet() {
     const tree_id:u64 = 1;

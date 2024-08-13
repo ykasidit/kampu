@@ -8,7 +8,6 @@ use serde::Deserialize;
 use serde_json::{Map, Number, Value};
 #[cfg(test)]
 use serde_json::json;
-
 #[cfg(test)]
 use crate::utils::hex_to_bin;
 
@@ -111,10 +110,12 @@ pub fn process_field(data: &[u8], field: &Branch, dry_run: bool, value: Number, 
     if let Some(match_cases) = &field.match_cases {
         println!("match_cases: {:?}", match_cases);
         let mut matched = false;
+        let matched_field_name = field.name.clone()+"_matched"; //use diff field name so wont override ori val in json dict
+        parsed_data.insert(field.name.clone(), Value::from(value.clone()));
         for (key, description) in match_cases {
             if key.starts_with("gt_") || key.starts_with("ge_") || key.starts_with("lt_") || key.starts_with("le_") {
                 if evaluate_expression(value.clone(), key) {
-                    parsed_data.insert(field.name.clone(), description.clone());
+                    parsed_data.insert(matched_field_name.clone(), description.clone());
                     matched = true;
                     break;
                 }
@@ -132,22 +133,22 @@ pub fn process_field(data: &[u8], field: &Branch, dry_run: bool, value: Number, 
                                 obj.get("name").unwrap().clone()
                             );
                         }
-                        parsed_data.insert(field.name.clone(), nested_data);
+                        parsed_data.insert(matched_field_name.clone(), nested_data);
                     }
 
                 } else {
                     println!("key matched: {} not object", key);
-                    parsed_data.insert(field.name.clone(), description.clone());
+                    parsed_data.insert(matched_field_name.clone(), description.clone());
                 }
                 matched = true;
                 break;
             }
         }
         if !matched {
-            parsed_data.insert(field.name.clone(), Value::String("unknown".to_string()));
+            parsed_data.insert(matched_field_name, Value::String("unknown".to_string()));
         }
     } else {
-
+        //non match case
         //make eval context
         let mut eval_context = HashMapContext::new();
         if value.is_f64() {
@@ -324,7 +325,8 @@ fn test_match_num_to_string() {
     let mut previous_values = HashMap::new();
     let (parsed_json, _) = parse_schema(&data, &schema.branches, false, &mut previous_values).unwrap();
     assert_eq!(parsed_json, json!({
-        "status": "Active"
+        "status": 1,
+        "status_matched": "Active"
     }));
 }
 
@@ -435,7 +437,8 @@ fn test_match_to_nested_packet() {
     let (parsed_json, _) = parse_schema(&data, &schema.branches, false, &mut previous_values).unwrap();
 
     assert_eq!(parsed_json, json!({
-        "type": {
+        "type": 1,
+        "type_matched": {
             "name": "Type1",
             "field1": 2,
             "field2": 1000
@@ -470,7 +473,8 @@ fn test_match_non_immediate_field_to_nested_packet() {
 
     assert_eq!(parsed_json, json!({
         "reserved": 255,
-        "type": {
+        "type": 1,
+        "type_matched": {
             "name": "Type1",
             "field1": 2,
             "field2": 1000

@@ -105,7 +105,8 @@ fn test_qstarz_ble_packet_gps_not_fixed()
     assert_eq!(
         parsed_json,
         json!( {
-                "fix_status": "Fix not available",
+                "fix_status": 1,
+                "fix_status_matched": "Fix not available",
                 "rcr": 84,
                 "millisecond": 376,
                 "latitude": -0.0,
@@ -122,7 +123,8 @@ fn test_qstarz_ble_packet_gps_not_fixed()
                 "vdop": 0.0,
                 "satellite_count_view": 13,
                 "satellite_count_used": 0,
-                "fix_quality": "invalid",
+                "fix_quality": 0,
+                "fix_quality_matched": "invalid",
                 "battery_percent": 60,
                 "dummy": 0,
                 "series_number": 0,
@@ -173,8 +175,10 @@ fn test_qstarz_ble_packet_gps_fixed_wo_gsv()
         json!({
                 "battery_percent": 60,
                 "dummy": 0,
-                "fix_quality": "GPS fix (SPS)",
-                "fix_status": "3D",
+                "fix_quality": 1,
+                "fix_quality_matched": "GPS fix (SPS)",
+                "fix_status": 3,
+                "fix_status_matched": "3D",
                 "float_height_m": 307.56298828125,
                 "float_speed_kmh": 3.055799961090088,
                 "g_sensor_x": 97.0/256.0,
@@ -220,7 +224,8 @@ fn test_qstarz_ble_packet_gps_fixed_w_gsv()
     assert_eq!(
         parsed_json,
         json!({
-                "fix_status": "3D",
+            "fix_status": 3,
+                "fix_status_matched": "3D",
                 "rcr": 84,
                 "millisecond": 400,
                 "latitude": 25.047732850000003,
@@ -237,7 +242,8 @@ fn test_qstarz_ble_packet_gps_fixed_w_gsv()
                 "vdop": 0.9700000286102295,
                 "satellite_count_view": 13,
                 "satellite_count_used": 5,
-                "fix_quality": "GPS fix (SPS)",
+                "fix_quality": 1,
+                "fix_quality_matched": "GPS fix (SPS)",
                 "battery_percent": 60,
                 "dummy": 0,
                 "series_number": 0,

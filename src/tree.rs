@@ -414,6 +414,24 @@ fn test_loop_until_no_more_data() {
     }));
 }
 
+macro_rules! get_or_default {
+    ($obj:expr, $key:expr, $default:expr) => {
+        $obj.get($key).cloned().ok_or($default).unwrap_or_else(|err| serde_json::Value::from(err))
+    };
+}
+#[test]
+fn test_json_default_val_if_not_present() {
+    let schema_json = json!({
+        "a": 1,
+        "b": 2
+    });
+    let c = schema_json.get("c").cloned().ok_or(3).unwrap_or_else(|err| Value::from(err));
+    assert_eq!(c, 3);
+
+    let c_alt = get_or_default!(schema_json, "c", 3);
+    assert_eq!(c_alt, 3);
+}
+
 #[test]
 fn test_match_to_nested_packet() {
     let schema_json = json!({
